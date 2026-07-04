@@ -58,6 +58,7 @@ output is rebuilt from the clean original's pixels.
 | `dark_art.py` | art-on-black (keep-black) reconstruction |
 | `page_dewarp.py` | page-level curl pre-pass |
 | `build_profile.py` | paper-profile helper |
+| `HOW_TO_USE.txt` | plain-language run instructions (ships next to the exe) |
 | `START_HERE.txt` | full design notes + per-version changelog |
 
 ## Honest limitations

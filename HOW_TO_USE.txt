@@ -1,0 +1,52 @@
+================================================================
+  DEWARP  —  how to use
+================================================================
+
+WHAT IT DOES
+  Cleans up scanned art-annual pages: straightens each artwork,
+  crops it, whitens the paper (or keeps the black background on
+  dark pages), and leaves the page text in place. It writes one
+  finished JPEG per page.
+
+----------------------------------------------------------------
+RUNNING IT  (pick whichever is easiest)
+----------------------------------------------------------------
+
+  1) DRAG AND DROP  (simplest)
+     Drag the FOLDER that holds your page scans onto the
+     dewarp program. It runs on its own and saves the results
+     to a new folder right next to it called:
+          <your folder>_reconstructed
+
+  2) DOUBLE-CLICK
+     A window opens and asks for the folder. Paste the full
+     path to the folder of scans and press Enter.
+
+  3) FROM A TERMINAL / COMMAND PROMPT
+          dewarp --input "C:\path\to\pages" --output "C:\path\to\out"
+     Add  --cached-profile  to reuse a saved paper profile.
+
+  First launch takes a few seconds — the program unpacks itself
+  before it starts. That's normal, not a freeze.
+
+----------------------------------------------------------------
+WHAT GOES IN THE FOLDER
+----------------------------------------------------------------
+  * Page scans as .jpg files.
+  * For a hand-marked page, put the magenta-marked copy next to
+    the clean scan and name it  <page>_mag.jpg .
+    The markup supplies the box/guide geometry ONLY — the finished
+    page is rebuilt from the clean original's pixels, never from
+    the marked-up copy.
+
+----------------------------------------------------------------
+GOOD TO KNOW
+----------------------------------------------------------------
+  * Ordinary clean pages are handled automatically.
+  * Tricky pages (mixed media, heavy curl, vivid full-bleed art)
+    are driven by your magenta markup and are worth a quick look
+    afterwards — automatic handling can occasionally misjudge a
+    page. Always eyeball the output.
+  * Nothing is ever written back into your input folder; results
+    only go to the output folder.
+================================================================
