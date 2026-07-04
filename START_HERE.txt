@@ -1,0 +1,1457 @@
+DEWARP PIPELINE — v57
+====================
+(Scanned art-plate reconstruction.)
+Deskews, crops and whitens scanned art-annual pages so each printed artwork is
+axis-aligned (on its ORIGINAL ground -- whitened paper for paper pages, the kept BLACK ground for art-on-black pages), with all page text retained. Drop this
+folder into a session to run.
+
+>>> HANDOVER NAMING — DO THIS EVERY TIME <<<
+  This pipeline is called "Dewarp Pipeline". Whenever you produce a new handover
+  zip, name it  Dewarp_Pipeline_v<N>.zip  where <N> is the previous version + 1.
+  This build is v49, so the next handover is v50, then v51, and so on — never reuse a
+  number, never drop the name. After bumping it, update the "DEWARP PIPELINE — v<N>"
+  line at the top of this file to match, so the version always travels with the code.
+  This build is v57; the next handover is v58.
+
+>>> READ FIRST — THIS IS AN IMAGE PIPELINE <<<
+  The deliverable is RENDERED JPEG FILES, never text. When the user posts page
+  scans to fix: stage them, run reconstruct.py, and present the resulting
+  *_reconstructed.jpg from OUTPUT_DIR with the file-presentation tool. Do NOT
+  describe, summarise, or "show" results as text or code output — actually write
+  the image files and surface them. Verify each output visually before shipping.
+  Do NOT render a CONTACT SHEET / thumbnail montage / overview grid on the user's
+  behalf -- it is not part of the deliverable. Ship the per-page *_reconstructed.jpg
+  (or a zip of them for a large batch) only. Make a contact sheet ONLY if the user
+  explicitly asks for one.
+  >>> NO SAMPLES (v27) <<< The deliverable is the FULL set of per-page
+  *_reconstructed.jpg (or one zip of all of them) -- nothing else. Do NOT produce,
+  copy out, or "present" a handful of SAMPLE / preview / representative pages, and
+  do NOT ask the user whether they want samples. Run the whole batch, zip it, ship
+  the zip. (Internal QC crops are fine to LOOK at while verifying, but they are not
+  delivered and not surfaced to the user.) The user will say if changes are wanted;
+  do not solicit per-page decisions.
+  Environment note: numpy is 2.x — use np.ptp(arr), NOT arr.ptp() (method removed).
+  Deps already expected: opencv-python (cv2), numpy, scipy.
+
+IMPROVEMENTS BAKED IN (this build — keep all of them)
+  - NEW v57 — SPREAD PAGES PLACED BACK IN LAYOUT (spread_align.reconstruct_layout).
+    Extends v56 so a two-page spread can be delivered as FULL PAGES, not just the two
+    loose halves. For a spread pair it: (1) corrects the CLOSED top-art boxes via
+    magenta_dewarp and whitens the page keeping its text (pages with no closed box
+    fall back to a flat-field-whitened base, so unboxed art is preserved in place,
+    not corrected); (2) reconciles the two bottom halves (v56); (3) drops each
+    reconciled half back into its ORIGINAL bottom-box position, anchored to the
+    gutter edge and to a COMMON top row (mean of the two top guides) at the common
+    reconciled scale -- so the two delivered pages register across the gutter while
+    the art sits where the layout puts it. The old footprint is cleared to page paper
+    first so no washed original shows around the placed art. Usage:
+        from spread_align import reconstruct_layout
+        L,R = reconstruct_layout(Lclean,Lmark,Rclean,Rmark)
+    VALIDATED — Spectrum 4 p050/p051 and p108/p109: all top plates corrected + colour
+    retained (p050 #1 93->89%%, p109 #3/#4 98->93%%), p051's UNBOXED tops preserved
+    (75->73%%, 78->78%%, not washed), reconciled bottoms present at both gutters
+    (94-97%% colour) and co-registered across the pair at 0 offset.
+  - NEW v56 — DOUBLE-PAGE SPREAD RECONCILIATION (new module spread_align.py). When
+    one artwork is printed across two facing pages and scanned as two pages, this
+    lines the two halves up on their shared (gutter) edge. On each page the magenta
+    guide's TOP and BOTTOM strokes trace the shared painting's top/bottom edges and
+    the single VERTICAL stroke marks the OUTER (non-gutter) edge; the gutter side is
+    left OPEN (that edge is the binding). spread_align.reconcile(left_clean,
+    left_mark, right_clean, right_mark):
+      * rectify_half() flattens each half to its top/bottom guides (straightening the
+        painting edges and any curl) and crops to exactly the painting height, from
+        the outer vertical edge to the gutter;
+      * scales both halves to a COMMON height, so both gutter edges are the same
+        height and the painting top/bottom (and every horizontal that runs across the
+        spread) register at the same row -> the halves line up on their edges;
+      * returns the two aligned halves + a butted `stitched` preview.
+      IMPORTANT — content physically lost in the gutter/binding CANNOT be recovered,
+      so this is a registration of the two halves, not an invented seamless fill; a
+      real gutter gap will remain at the join. Usage:
+        python3 spread_align.py L.jpg Lmag.jpg R.jpg Rmag.jpg  Lout.jpg Rout.jpg Stitch.jpg
+      VALIDATED — Spectrum 4 p050/p051 (Image_0001) bottom spread: halves rectified
+      (left 1629px, right 1650px painting height; scans differed ~1.4%% in scale) and
+      scaled to a common 1650px; shared top border (0.5%%) + the line at ~7.8%% height
+      register at ~0 offset. Template match at the gutter was 0.17-0.21 (no shared
+      content) confirming real gutter loss -> aligned by frame, not stitched blind.
+  - NEW v55 — TEXT WARP GUIDES GENERALISED (magenta_text.py + reconstruct.py). The
+    v54 text-block feature is extended so a guide is understood as a set of WARP
+    REFERENCES, not a boundary box. Key changes:
+      * MULTIPLE STACKED GUIDES. A text block can carry N horizontal guides drawn at
+        increasing depth (each an under/overline tracing the warp at that row). The
+        correction is now a PIECEWISE column remap through every guide (flatten each
+        guide to its own level, interpolate between, linearly extrapolate past the
+        ends), so a warp that WORSENS down the page is removed -- not just a single
+        global tilt. 1 guide -> parallel deskew; 2 -> top/bottom (as v54); N -> full
+        piecewise. A guide set needs NO box: bare stacked underlines (no verticals)
+        are assembled by x-overlap (magenta_text._stack_horizontals); boxed guides
+        keep coming from span-reach assembly. magenta_regions() now returns per
+        region 'hlines' (sorted warp guides) + 'vlines' (bounds) instead of 'sides'.
+      * BOTH POLARITIES. region_is_text() now fires for white-on-black colophon /
+        copyright pages as well as dark-on-paper, and the text-warp correction runs
+        on the DARK_BG (art-on-black) path too, sourcing the composed dark page so
+        the block keeps the BLACK ground.
+      * TEXT-ONLY MARKUPS. A markup with only text guides (no art box) is now a valid
+        job: magenta_dewarp returns no page, so the base is built by flat-field
+        whitening the clean original (paper lifted, colour/spine + text kept IN PLACE
+        so the guides still register), then the block is flattened on top. The markup
+        gate accepts a >=2-guide stack (or >=3-sided box) as a markup.
+      * BG MATCH kept from v54: the flatten is applied to the already-composed page,
+        so the block keeps the page's own background (paper white OR black) with no
+        seam, in either polarity.
+      VALIDATED — Spectrum 2 p157 (paper: 2-guide open box over the back-cover blurb;
+      red spine preserved meanL 69->68, text ink 12.5->12.2%%, block bg 252 = page bg
+      252) and Spectrum 4 p005 Image_0001 (white-on-black colophon: 5-guide warp
+      stack; line-skew spread halved sd 0.54->0.23 / |max| 1.25->0.89, white text
+      11.8->11.6%%, black ground 0=0, zero magenta leak). p142 (v54 art+boxed-text)
+      re-verified unchanged.
+  - NEW v54 — MAGENTA-GUIDED TEXT-BLOCK CORRECTION (new module magenta_text.py).
+    Adds the ability to correct a TEXT column from a magenta guide, alongside the
+    existing art-box magenta workflow. The art path (magenta_crop.magenta_dewarp) is
+    UNCHANGED; text correction is layered on top, so art-only markups behave exactly
+    as in v53 (the text pass is a no-op when no text region is present).
+      HOW A TEXT GUIDE IS DRAWN. On the pixel-aligned clean copy, draw a magenta
+      guide around the text column. It need NOT be a closed box:
+        - left-justified text  -> usually NO right guide (open-right "C")
+        - right-justified text -> may have NO left guide
+        - any / all four sides may be present.
+      The TOP stroke is NOT a crop edge: it traces how the top of the text is
+      skewed/warped. The block is FLATTENED so the top guide (and the bottom guide,
+      if drawn) becomes straight and level. The flatten is applied to the ALREADY-
+      COMPOSED, page-whitened page, so the block keeps the PAGE's own background tone
+      (no separate whitening pass; exposed edges replicate the page border) — no
+      bright rectangle, no seam. A page_dewarp-style column remap keyed to the
+      artist's guide instead of detected baselines.
+      TEXT vs ART is decided by CONTENT (region_is_text: low colour + regular text
+      lines in the CLEAN original inside the region), so a guide over prose is
+      corrected and a guide over a plate is dewarped as art. Magenta pixels only
+      ever supply geometry; none reach the output.
+      REGION GROUPING (also fixes the recurring detached-edge case). magenta_text
+      .magenta_regions() assembles magenta strokes into regions by SPAN-REACH: a
+      horizontal and a vertical are two sides of the same box if the H's x-span
+      reaches the V's column AND the V's y-span reaches the H's row. Only H-V links,
+      so adjacent plates sharing a gutter stay separate, while an OPEN box, an offset
+      corner, or a small corner gap still groups. This recovers boxes that the
+      closed-loop magenta_boxes drops. (Very large corner gaps — hundreds of px —
+      still won't bridge; close the corner when marking.)
+      MARKUP GATE. A file now counts as a markup if it has >=1 closed magenta loop
+      OR an assembled guide with >=3 drawn sides, so a TEXT-ONLY markup (no art box)
+      is detected too. Incidental art paint forms no thin-stroke rectangle, so this
+      stays false-positive-safe.
+      VALIDATED — Spectrum 2 p142 (3 art plates 219/220/221 + a left-open text-C over
+      the credits column). All 4 regions detected & routed (3 ART + 1 TEXT); plates
+      deskewed ~0 deg with colour retained + whitened (219 L85->97, 220 L68->83,
+      221 L166->190); text block ink 5.7->5.2%% (preserved) with its background
+      MATCHED to the page (252/252, zero seam at the block edge); zero
+      magenta outside plates. NOTE for this page: the drawn guides read -1.10 deg
+      (top) / -1.36 deg (bottom) while the text's own dominant skew is ~-0.50 deg, so
+      flattening faithfully to the guide leaves the text ~0.6 deg tilted the other
+      way — the guide is honoured as drawn (a manual override, not auto-detect);
+      redraw the guide along the actual text rows for a tighter result.
+  - NEW v53 — SPECTRUM 22 + SPECTRUM 24 SKIP PAGES PINNED (PAGE_OVERRIDES). Code is
+    IDENTICAL to v52 (which was identical to v51/v50/v49/v48/v47); the only change is
+    twelve page-type overrides for two freshly processed volumes, both hitting the same
+    "mottled / decorative leaf" SKIP branch (heavy/darker coverage on a shaded ground).
+      SPECTRUM 22 (input pages 001-305, lowercase 'spectrum 22_Page_NNN.jpg') — EIGHT
+      real full-bleed PAINTINGS were dropped to SKIP; all forced FULL_BLEED, verified
+      on-screen (each a clean 1-panel plate, no spurious box). p249 (3%% colour) and
+      p155 (11%%) are MUTED low-sat paintings, not text:
+        p002, p011, p083, p101, p130, p155, p179, p249  -> FULL_BLEED
+      SPECTRUM 24 (input pages 001-303, 'Spectrum 24_Page_NNN.jpg') — FOUR real
+      full-bleed PAINTINGS dropped to SKIP; all forced FULL_BLEED. Verified by
+      MEASUREMENT this session (inline image viewer was down, as in the Spectrum 9
+      p045/p131 session): input->output colour coverage was RETAINED for all four
+      (p009 46->37%%, p010 7->7%%, p106 23->21%%, p202 70->66%%) with the ground
+      whitened (meanL +30..55) -- i.e. a real plate placed on whitened ground, NOT a
+      spurious box (which would collapse coverage). QC crops kept for a later eyeball.
+        p009, p010, p106, p202  -> FULL_BLEED
+    Same surgical approach as every prior volume (Spectrum 16/13/12/10/9 etc.) -- a
+    per-file override is the safe fix; classify_page was NOT loosened. Genuine blank
+    leaves remain correctly SKIP. Everything else is v52/v47 unchanged.
+  - NEW v52 — SPECTRUM 16 SKIP PAGES PINNED (PAGE_OVERRIDES). Code is IDENTICAL to v51
+    (which was identical to v50/v49/v48/v47); the only change is six page-type overrides
+    for the Spectrum 16 batch (pages 001-267), where classify_page sent six real
+    full-bleed PAINTINGS to SKIP via the "mottled / decorative leaf" branch (heavy
+    saturated coverage on a shaded/dark ground). Verified on-screen this session -- all
+    six are genuine single/multi art plates (colour cov 22-63%, meanL 135-168):
+      * 'Spectrum 16_Page_006.jpg' -> FULL_BLEED (dark portrait plate; 30.3%% colour) -> 1 panel.
+      * 'Spectrum 16_Page_108.jpg' -> FULL_BLEED (28.4%% colour) -> 3 pictures (multi).
+      * 'Spectrum 16_Page_180.jpg' -> FULL_BLEED (29.8%% colour) -> 2 pictures (multi).
+      * 'Spectrum 16_Page_188.jpg' -> FULL_BLEED (22.6%% colour) -> 3 pictures (multi).
+      * 'Spectrum 16_Page_207.jpg' -> FULL_BLEED (62.9%% colour) -> 1 panel.
+      * 'Spectrum 16_Page_235.jpg' -> FULL_BLEED (55.5%% colour) -> 1 panel.
+    Same surgical approach as Spectrum 13 p080/086/106/177, Spectrum 12 p019/p077 and
+    Spectrum 9 p045 -- classify_page was NOT loosened. p002 is a genuine blank white leaf
+    (meanL 255, 0%% colour) and is correctly left as SKIP. All six reconstructions and the
+    six highest page-decurl-field pages (p126/172/174/138/255/263) were verified clean
+    (no tearing) this session. Batch delivered: 266 outputs (267 pages - 1 blank SKIP).
+  - NEW v51 — SPECTRUM 13 SKIP PAGES PINNED (PAGE_OVERRIDES). Code is IDENTICAL to v50
+    (which was identical to v49/v48/v47); the only change is four page-type overrides for
+    the Spectrum 13 batch (pages 001-227), where classify_page sent four real full-bleed
+    PAINTINGS to SKIP via the "mottled / decorative leaf" branch (heavy saturated coverage
+    on a dark ground). Verified on-screen this session:
+      * 'Spectrum 13_Page_080.jpg' -> FULL_BLEED. Dark atmospheric plate (54.7%% colour
+        coverage); forced FULL_BLEED -> 2 pictures (multi).
+      * 'Spectrum 13_Page_086.jpg' -> FULL_BLEED. Jeremy Geddes "Doomed" cover, low-key
+        figure against pale sky (28.6%% colour); forced FULL_BLEED -> 1 panel.
+      * 'Spectrum 13_Page_106.jpg' -> FULL_BLEED. Bronze sculpture on grey ground
+        (45.0%% colour) dropped the same way; forced FULL_BLEED -> 1 panel.
+      * 'Spectrum 13_Page_177.jpg' -> FULL_BLEED. Carman "Carnivore Pond" acrylic
+        (38.6%% colour); forced FULL_BLEED -> 1 panel.
+    Same surgical approach as Spectrum 12 p019/p077 and Spectrum 9 p045 — classify_page
+    was NOT loosened. p002 is a genuine blank leaf and is correctly left as SKIP.
+  - NEW v50 — SPECTRUM 12 SKIP PAGES PINNED (PAGE_OVERRIDES). Code is IDENTICAL to v49
+    (which was identical to v48/v47); the only change is three page-type overrides for
+    the Spectrum 12 batch (pages 001-211), where classify_page sent three real content
+    pages to SKIP:
+      * 'Spectrum 12_Page_019.jpg' -> FULL_BLEED. A full-bleed saturated PAINTING
+        (96.7%% colour coverage) read as a mottled/decorative leaf (the SKIP branch);
+        forced FULL_BLEED gives a clean 1-panel reconstruction (cf. Spectrum 9 p045).
+      * 'Spectrum 12_Page_077.jpg' -> FULL_BLEED. A full-bleed atmospheric PAINTING
+        (29.6%% colour coverage) dropped the same way; forced FULL_BLEED -> 1 panel
+        (cf. Spectrum 10 p042).
+      * 'Spectrum 12_Page_003.jpg' -> TEXT. A light TONED title/section page (meanL 198,
+        ~2.3%% dark ink): SKIP dropped it. TEXT whitens the ground and keeps the title.
+    p002 (a genuinely blank leaf) is correctly left as SKIP. Verified by measurement AND
+    on-screen this session. Rule reaffirmed (as for Spectrum 9 p045/p131, Spectrum 10
+    p042/p120/p121, Spectrum 4 p158/159, Spectrum 20 p006): a per-file override is the
+    safe surgical fix -- do NOT loosen classify_page to pull these in. Everything else is
+    v49/v48/v47 unchanged.
+  - NEW v49 — SPECTRUM 10 SKIP PAGES PINNED (PAGE_OVERRIDES). Code is IDENTICAL to v48
+    (which was identical to v47); the only change is three page-type overrides for the
+    Spectrum 10 batch, where classify_page sent three real content pages to SKIP:
+      * 'Spectrum 10_Page_042.jpg' -> FULL_BLEED. A vivid MULTI-PLATE showcase (three real
+        plates, ~37%% colour coverage) whose heavy saturated coverage read as a mottled /
+        decorative leaf (the SKIP branch). Forced FULL_BLEED reconstructs all three plates
+        (coverage preserved; art_pictures returns 3, not a single painting split).
+      * 'Spectrum 10_Page_121.jpg' -> FULL_BLEED. A single full-bleed PAINTING (~31%% colour)
+        dropped the same way; forced FULL_BLEED gives a clean 1-panel reconstruction.
+      * 'Spectrum 10_Page_120.jpg' -> TEXT. A low-sat TONED text page (meanL 182): SKIP
+        dropped it, and forcing FULL_BLEED would hunt a spurious box (cf. Spectrum 9 p131).
+        TEXT is correct -- it whitens the toned ground (182 -> 227) and keeps the text
+        (~6%% ink retained).
+    Verified by measurement AND on-screen this session. Rule reaffirmed (as for Spectrum 9
+    p045/p131, Spectrum 4 p158/159, Spectrum 20 p006): a per-file override is the safe
+    surgical fix -- do NOT loosen classify_page to pull these in. Everything else is v48/v47
+    unchanged.
+  - NEW v48 — SPECTRUM 9 SKIP PAGES PINNED (PAGE_OVERRIDES). Code is IDENTICAL to v47; the
+    only change is two page-type overrides for the Spectrum 9 batch, where classify_page
+    sent two real content pages to SKIP:
+      * 'Spectrum 9_Page_045.jpg' -> FULL_BLEED. It is a vivid full-bleed PAINTING but its
+        heavy, saturated colour coverage read as a "mottled / decorative leaf" (the SKIP
+        branch), and it is a smaller-dimensioned scan (1958x2641) which did not help. Forced
+        FULL_BLEED reconstructs it cleanly (coverage preserved).
+      * 'Spectrum 9_Page_131.jpg' -> TEXT. A low-saturation TONED text page: SKIP dropped it,
+        and forcing FULL_BLEED was wrong (the art detector found a spurious box and wiped the
+        page to ~14%% coverage). TEXT is correct -- it whitens the grey ground and keeps the
+        text (meanL 170 toned -> 215 clean, ~17%% ink retained).
+    Both were VERIFIED by measurement only (this session's inline image viewer was down); the
+    reconstructions should still be eyeballed. Rule reaffirmed: do NOT loosen classify_page to
+    pull these in -- a per-file override is the safe surgical fix, exactly as for the earlier
+    Spectrum 4 p158/159 and Spectrum 20 p006 entries. Everything else is v47 unchanged.
+  - NEW v47 — SEPARATED / "CHOPPY" TOP STRIP ACTUALLY REMOVED (deskew_crop._wipe_soft_bands,
+    called from compose_fullbleed + compose_multi; supersedes the v45 per-pixel faint_bg).
+    Root cause finally pinned by measurement, NOT the v44/v46 theory: on the flagged pages
+    (Spectrum 2 p016-019/028/029/036/039/042/082-085/095-099/118/124-127) the plate IS
+    detected and placed correctly (verified p018: art top y=401) -- the strip is a faint
+    SCAN-SHADOW / under-whitened GREY BAND left in the top MARGIN (p018: a soft band at
+    y~90-240, a few levels below paper). It is not in the art mask, so the footprint erase
+    never reaches it; v45 tried to wipe it with a per-PIXEL near-paper test (Lw>pwl-28 &
+    Sat<30) but the band is partly soft ART FRINGE -- measured on p018, ~48%% of it is darker
+    than that L cut and ~21%% is faintly tinted -- so about half survived as the visible grey
+    ghost rectangle ("choppy"). FIX: wipe by CONNECTED COMPONENT instead. Form a soft-grey
+    mark mask (a little below paper, low-sat, not solid ink), and wipe a WHOLE component only
+    when it is genuinely soft, low-sat and non-ink. Hard guarantees so art is never touched:
+      * restricted to OUTSIDE the placed crop(s) (keep_pic / keep_pics) -- plate interiors
+        can't change; and OUTSIDE the page text-line mask -- captions/credits untouched;
+      * a wiped pixel is GUARANTEED S<40: the mask is re-intersected with (S<40) AFTER the
+        (small, 5x5) close, so the close can never ENGULF a tinted plate edge into the band
+        (this was the real hazard -- an early 9x9 build pulled sat~56 ceiling pixels on p042
+        into the band and wiped them; the re-intersect + a per-component Sp90<45 tail guard
+        fix it: p042 saturated-wipe went 10.7%% -> 0.0%%);
+      * solid ink is outside the mask (L<=pwl-90) so page/plate NUMBERS & signatures survive;
+      * per-component gates VECTORISED (mean-sat via bincount, area floor) so it never loops
+        median/percentile over 10^4-10^5 grain specks (the v44b stall lesson -- p039 stalled
+        a Python-loop build; vectorised it renders fine).
+    Verified across all 22 flagged pages: top-margin soft-band px down 58%% overall (65-93%%
+    on the heavy pages 018/039/042/085/095/097/126), page text / numbers byte-stable (~0%%
+    ink change), and of the pixels actually wiped, <=0.3%% were saturated on any page (art
+    provably untouched). Pages whose top region is mostly ART or grain (082/118/019) are
+    near-unchanged, correctly (no isolated margin band there). NOTE: verify the final JPEGs
+    on-screen before shipping as always -- this build's numbers are clean but eyes are the
+    last gate.
+  - NEW v46 — CANDIDATE FIX (verify visually) for the SEPARATED TOP STRIP on single-art
+    pages (16-19,28,29,36,39,42,82-85,95-99,118,124-127). Root cause: the art region can
+    span nearly the whole page (painting + scan junk at the top/right/bottom edges); the
+    keystone pass close_triangles then mis-fired on that oversized region and cropped away
+    ~30%% of the plate, stranding that slice as a separate, slightly-wider rectangle. FIX:
+    close_triangles min_span 0.55 -> 0.88 and a new guard that refuses any warp whose target
+    rectangle is < 90%% of the crop (Wd/Hd gate). Effect: p019/p018 now trim ~2%% instead of
+    ~30%%. NOTE: verify on-screen; the art component still includes some edge content, which
+    may need a follow-up (tighten _art_component to the dominant plate rectangle).
+  - NEW v45 — FAINT "TOP STRIP" ON SINGLE-ART PAGES REMOVED (paper, not art). Distinct from
+    the v44 multi-page split: on single-art pages (Spectrum 2 p016-019/028/029/036/082-085/
+    095-099/124-127) the strip was UNDER-WHITENED PAPER above the art -- the flatfield left
+    the paper a few levels grey next to the sharp art edge, and the cleaner erased halo made
+    it read as a separate, slightly-wider rectangle. (It is not a component, so the v44
+    reunite could not touch it -- that is why those pages were unchanged.) FIX: after compose,
+    OUTSIDE the placed crop, low-saturation NEAR-PAPER pixels (Lw > paper-28, sat < 30) are
+    set to the clean paper tone, in BOTH compose_fullbleed and compose_multi. Guards: colour
+    art (saturation), ink / dark art (value) and the page TEXT (text-line mask) are all far
+    outside that band and untouched. Verified: p016/p082 top levels to clean paper (234->249),
+    art and caption text preserved; p042 ceiling art untouched.
+  - NEW v44 — NO MORE SPLIT-OFF TOP STRIP (a plate region left behind as a separate,
+    slightly-wider rectangle). On plates with a light ceiling / sky / tonal-transition
+    band, the art mask dips below threshold across that band, splitting a strip (usually
+    the TOP) into its own connected component. The old code kept only the LARGEST
+    component (and art_pictures gated out the sub-size strip), so that strip was never
+    cropped or erased -- it survived at its original position and width while the main art
+    was cropped tighter and placed, reading as a separate wider rectangle above the art
+    (Spectrum 2 p016-019, 028, 029, 036, 039, 042 top-right, 082-085, 095-099, 118,
+    124-127; single AND multi pages).
+    FIX, in two places, both using the existing ART-IN-THE-GAP test so it reunites ONE
+    plate but never joins SEPARATE plates:
+      * _art_component() now REUNITES components that belong to one plate: a component is
+        merged into the art region when it overlaps the region on one axis, sits only a
+        small gap away on the other, AND art bridges the gap CONTINUOUSLY (every row/col
+        in the connecting strip holds art -- mean > 0.35 and no near-empty line). A plate
+        split by a tonal dip stays connected side-to-side; two plates separated by a PAPER
+        gutter have an empty line in the strip and are NEVER joined.
+      * art_pictures() ABSORBS a substantial sub-gate component (the split strip) into a
+        picture, but only if it connects to EXACTLY ONE picture -- if it would touch two,
+        it is skipped, so a stray blob can NEVER bridge two separate arts into one. Seed
+        picture-to-picture merging is unchanged, so plate counts never drop.
+    Verified: single pages render one contiguous plate (strip gone); p042 ceiling is now
+    part of plate 41's single crop (no paper gap between them); the 2x2 grids still detect
+    4 separate plates (no wrong join); all Spectrum 2 picture counts unchanged.
+  - NEW v44b — DESPECKLE / CREDIT-RECLAIM VECTORISED (speed + no more stall). _despeckle_paper
+    and _reclaim_credit_blocks looped in Python over ~70-90k connected components (a full-
+    image slice per component) -> 20-30s PER PAGE, and on a faint, heavily-decurled page
+    (p149) that ran long enough to stall the batch. Rewritten as vectorised label lookups:
+    output is BYTE-IDENTICAL (verified p050/p100), ~2x faster per page, stall gone.
+  - NEW v43 — PAGE TEXT IS STRAIGHTENED to match the deskewed plates (guarded).
+    Before v43 the plates on a multi-art page were deskewed but the caption / credit
+    columns and header lines were left at the ORIGINAL scan tilt, so text and art
+    disagreed by the small page-skew angle. v43 straightens the page text too, via the
+    new guarded text_blocks.deskew_text_blocks (NOT the old SAFE_TEXT wipe/ink path that
+    caused blobs -- that stays off). Flag: DESKEW_PAGE_TEXT (default True), applied after
+    compose on FULL_BLEED / multi pages. It is deliberately conservative and CANNOT step
+    over other text or art:
+      * the detected picture rectangles are passed in as NO-GO zones (dilated ~1.5%% to
+        cover the deskew shift); find_blocks drops any block sitting on art and a
+        saturation guard drops anything colourful, so a plate is never mistaken for text;
+      * a block is only ROTATED when its own tilt exceeds min_angle (0.25 deg) -- level
+        text is left exactly as scanned, so there is no needless re-stamp;
+      * a measured angle ABOVE max_angle (2.0 deg) is treated as an UNRELIABLE estimate
+        (short/justified block or edge curl -- page tilt on these scans is ~1 deg) and is
+        NOT trusted; the block is left untouched, so text is never over-rotated;
+      * the straightened FOOTPRINT is rejected (block left as-is) if it would land on an
+        art box OR on any block already straightened this pass -> deskewed text can never
+        overlap other text or art;
+      * glyphs are composited from the ORIGINAL grey pixels (never a flat ink fill), so
+        edges stay clean -- no blobs / speckle.
+    Verified on Spectrum 5 p037 (caption column, -0.3..-0.6 deg) and the tight p087 2x2
+    grid: captions straightened and crisp, no overlap with the closely-packed plates.
+  - NEW v42 — TEXT IS BACKGROUND, NEVER ART (stops the multi-plate caption SMASH).
+    On multi-picture showcase pages (e.g. Spectrum 5 "dimensional" p087: a 2x2 grid of
+    sculpture plates with a caption column; also p035/p039/p100/p128/p154 etc.) the
+    caption/credit text was being swept INTO the art. Cause: the art mask marked any
+    dark-vs-paper pixel as art, so dark caption ink counted as art, and the 25x25 CLOSE
+    in art_pictures() then bridged the plate GUTTERS + the text->plate gap into ONE
+    page-wide component. The page was therefore mis-read as a single FULL_BLEED plate,
+    deskewed as a whole, and the page text was re-stamped on top of the rotated copy ->
+    a doubled / offset "art text" ghost jammed against the real captions.
+    FIX: (a) _text_line_mask() detects genuine PAGE TEXT (wide-short high-aspect ink runs
+    at a regular pitch, the text_structure signature) and it is SUBTRACTED from the art
+    mask in BOTH art_pictures() and _art_component() -- text can no longer bridge plates,
+    drag an art box into the text column, or ride inside a plate's crop. (b) art_pictures'
+    pre-CLOSE dropped 25 -> 11 so it solidifies a plate's interior without leaping a real
+    gutter; _merge_boxes_gapaware() still re-joins the pieces of a SINGLE painting (art in
+    the gap) while gutter-separated plates stay split. Result: p087 now correctly splits
+    into 4 plates via compose_multi (was 1 whole-page panel), captions read clean with no
+    ghost, and single-plate / already-correct multi pages are unchanged (text subtraction
+    is a no-op with no caption; the smaller close gave identical splits on the tested set).
+  - NEW v42 — NO MORE GREY TEXT BOX / SMUDGED-DOUBLED CAPTIONS on diagonal multi pages.
+    Follow-on to the smash fix. On pages where the plates sit DIAGONALLY (e.g. Spectrum 5
+    p037: right-column plates + a bottom-left pencil plate), three things combined to paste
+    a grey rectangle of half-clipped, doubled caption text over entries 1-2:
+      (1) _should_merge() merged ANY two boxes whose bounding boxes overlapped ("overlap ->
+          same artwork"). Diagonal plates overlap only at a corner, so the union ENGULFED
+          the empty top-left corner where the captions live. FIX: in the overlap branch,
+          reject the merge when it would swallow a meaningful NEW region that holds no art
+          (that engulfed corner reads ~0 because text is already subtracted) -> the two
+          plates stay separate and the caption corner is never inside an art rectangle.
+      (2) compose_multi padded each picture box by 0.08*MAX(w,h) -- the LONGER side on BOTH
+          axes -- so a TALL box got a huge HORIZONTAL pad that reached into the caption
+          column; its crop then overwrote the right half of every line and pasted a grey
+          left margin over them. FIX: pad PER AXIS (0.08*w wide, 0.08*h tall).
+      (3) _art_component's CLOSE 25 -> 13, so any residual caption ink the text mask missed
+          no longer bridges onto an adjacent plate and drags its crop into the text.
+    Result: p037 captions read fully and clean on plain paper, no grey box, no doubling;
+    single-plate pages (p015/p048/p093) and the grid pages (p035/p087/p100/p128/p154) are
+    unchanged. General rule enforced: PAGE TEXT is always clean whitened text on paper and
+    is never covered by, or carried inside, an art crop.
+  - NEW v41 — WHITENING NO LONGER BLOWS OUT DARK PLATES (the red/yellow-noise damage).
+    On TEXT pages with an embedded colour plate / photo (Spectrum 4 "Year in Review"
+    p011-016: the De Es sculpture photo, the Kingdom Come cover, Alan Lee's Odysseus, the
+    Berkey STRINGS plate), flatfield_whiten was DIVIDING the plate out as if it were paper
+    and amplifying dark regions ~30x into red/orange/yellow noise -- far worse than the
+    original. Cause: _content_mask only caught locally-CONTRASTY dark pixels (edges), so a
+    plate's UNIFORMLY DARK interior was treated as paper. FIX: (a) _picture_region_mask()
+    finds whole plates by non-paper COVERAGE DENSITY and fills their bounding boxes (dark
+    interiors included); _content_mask now unions it in, so the whole plate is inpainted to
+    a uniform paper level and receives a mild UNIFORM gain (its internal contrast is kept),
+    never a blow-out; (b) the whitening gain (target/B) is CAPPED at 2.2x as a safety net so
+    no residual dark pixel can explode. No-op on pure-text pages and unaffected paper.
+  - NEW v40 — ">74% TEXT+PAPER = TEXT" GATE (stop missing text pages). classify_page now
+    adds: if a page is >74% text+background (i.e. <26% PICTURE) and has real text
+    (text_lines>=20), it is a TEXT page. _picture_fraction() measures dense colour-plate/
+    photo coverage; 1-that is the text+paper share. This catches essays, indices, contents,
+    editorial intros and credit/divider pages that the older text-AREA gate narrowly missed
+    (e.g. Spectrum 2 p013 essay=97% text+paper, p153 index=100%, p010 intro=98%, p066 credit
+    divider=77%, p008 indicia=100% -> all TEXT now). Blank / decorative / marbled leaves stay
+    SKIP (few real lines, or heavy mottling reads as high picture coverage), and NO art plate
+    qualifies (plates are 37-55% picture -> 45-63% text+paper, well under 74%). The old
+    Spectrum 2 p013/p153 PAGE_OVERRIDES were removed -- the gate handles them.
+  - NEW v40 — TEXT-PAGE CURL NO LONGER WAVES EMBEDDED PLATES. On a TEXT page that carries a
+    colour plate/photo with a caption above or below it, dewarp_text.estimate_field was
+    fitting "baselines" to the plate's own horizontal structure (rock strata, cloud bands),
+    injecting large erratic vertical displacements that the smoothing smeared into the plate
+    border and adjacent text -> the artwork went wavy (user-reported). FIX: (a) _dewarp_art_
+    mask() finds picture regions by non-paper COVERAGE DENSITY (dense=plate, sparse=text) and
+    the plate's own texture is excluded from peak detection; (b) ZERO-ANCHORS pin the curl
+    field to 0 inside picture interiors and along the page border, so the text-fit field
+    never extrapolates across a plate and warps it. Result: plate edges stay level (verified
+    p066), while the surrounding text is still curl-corrected. No-op on pure-text pages
+    (art mask empty) and on FULL_BLEED pages (which use the separate page_dewarp path).
+  - NEW v39 — FULL_BLEED / MULTI TEXT NO LONGER DESTROYED (root-caused by ablation).
+    On pages that classify FULL_BLEED but carry a left CREDIT COLUMN + section HEADER
+    (Spectrum 2 p020 "editorial", p032 "advertising", and similar), the shipped text was
+    eroded/ghosted. Cause: compose_fullbleed / compose_multi ran _clean_background, which
+    WIPES everything outside the placed art box to flat paper — including the credit column
+    and header (page text lives OUTSIDE the art) — and _restore_page_text / _reclaim_credit_
+    blocks could only partially stamp it back, leaving broken strokes. (TEXT_LEFT pages like
+    p088 were always fine because that path never wipes.) Proven by 3-way ablation: skip the
+    wipe -> text perfectly crisp; keep wipe, skip restore -> column goes blank. FIX: both
+    compositors now KEEP the whitened original page (already clean paper + faithful text/
+    header/numbers everywhere outside the art); only the art FOOTPRINT is erased (plus the
+    per-picture border band in multi), so plate fringe is still removed but no page text is
+    ever wiped. Net: text/headers on these pages are now crisp AND faded headers/captions on
+    ordinary plates (e.g. p036 "GOLD AWARD") are recovered; pure-art plates unchanged.
+    (_clean_background / _restore_page_text / _text_furniture_keep remain in the file but are
+    no longer called from the compositors.)
+  - NEW v39 — SPECTRUM 2 p013 PINNED TO TEXT (PAGE_OVERRIDES). The Frazetta Grand Master
+    essay lands one hair under the TEXT gate (text_frac=0.300, gate is >0.30) and then picks
+    up a PHANTOM art box on a mottled blank-paper patch, pasted as a grey rectangle. Pinned
+    TEXT -> clean curl+whiten, all essay text kept, no false plate.
+  - v39 also carries the earlier Spectrum 2 index fix: p153 pinned TEXT (second half of the
+    p152/153 artist-index spread), and a chunked-run cached-profile fast path
+    (DEWARP_CACHED_PROFILE=1) + an import guard (DEWARP_IMPORT=1) that lets reconstruct.py be
+    imported as a function library without running the batch — both output-neutral.
+  - NEW v38 — SPECTRUM 4 ARTIST-INDEX PAGES p158 & p159 PINNED TO TEXT (PAGE_OVERRIDES).
+    Re-running the Spectrum 4 p005+p122-161 batch on the v37 art path: p158/p159 are
+    multi-column small-text directory pages (same kind as p156/p157, which classify_page
+    sends to TEXT and renders clean), but both slip to FULL_BLEED. Under v37 this is WORSE
+    than the older grey-ground failure: the art path detects one column-ish region as the
+    "art" rect and the rewritten _clean_background wipes everything outside it as background
+    -> most of the index text is ERASED (only the column inside the rect survives; verified
+    on p159: left columns gone). Forced both to TEXT via PAGE_OVERRIDES; they now render via
+    the clean whitened-columns text path, full text intact, matching p156/p157. Root cause
+    is classify_page under-scoring text_structure on these two specific scans (p156/157 clear
+    the gate, 158/159 fall a hair short) -- the override is the safe surgical fix; do NOT
+    loosen the text gate enough to pull real plates into TEXT. (Also still present on this
+    batch, unchanged from v34/v37 and acknowledged in the v37 cutout notes: p132's lower
+    "GAMEWORKS" plate is a frameless cutout boxed as a rectangle, so a faint grey field rings
+    the irregular art -- v37's clean-paper fill softened the hard seam vs earlier builds but
+    the cutout-vs-rectangle fix, fill-ratio classify -> whiten the non-art remainder, is the
+    real cure.)
+
+
+  - NEW v37 (clean-crop, round 2) — ROOT-CAUSED THE RAGGED BLACK BORDERS + STOPPED ART
+    DESTRUCTION (deskew_crop.py). After reviewing the WHOLE batch: (a) the ragged dark
+    borders on dark paintings (035 clowns, 050 wizard, 037, 047) were NOT in the scans and
+    NOT in the crops -- they were RE-STAMPED by _restore_page_text, which restored every
+    locally-dark low-sat pixel of the original (incl. the torn page edge) onto the cleaned
+    page. Fixed: _restore_page_text now restores TEXT-SIZED components only (4<=area<=9000,
+    h<=75, w<=1200) -- glyphs/words/numbers come back, a torn-edge / fringe MASS does not.
+    (b) _clean_background was destroying art (045 blue plate's left half wiped white) because
+    it only protected DARK masses and excluded anything adjacent to a rect. Rewritten: it
+    now KEEPS every SUBSTANTIAL BLOCKY non-paper mass (colour or dark, min side > 3% of the
+    page) regardless of adjacency -- real art is never erased -- while still wiping paper,
+    thin fringe, gutter frames and specks. Verified across the batch: torn borders gone,
+    045 plate whole, margins clean, credit columns/numbers intact.
+    KNOWN MINOR (reviewed, disclosed): 045 mis-classifies as "1 panel" (art_pictures recall)
+    so its blue plate shows a faint vertical seam (whole, not destroyed); a few dark bleed
+    plates (050 right) keep a thin edge remnant. Next: raise art_pictures recall on
+    side-by-side plates so 045 splits into 3 and the seam goes.
+
+  - NEW v37 (clean-crop) — RESIDUE REMOVED; CROPS LAND ON CLEAN PAPER (deskew_crop.py,
+    compose_fullbleed + compose_multi). At the user's instruction ("if you crop, crop
+    clean"): (1) every erased/empty region is filled with UNIFORM CLEAN PAPER (sampled
+    page white) -- the _bg_texture grey/grain fill is GONE (it was the grey footprint band
+    + the mirror-tiled patches); (2) the original art footprint is erased with a GENEROUS
+    dilate so the soft art fringe goes too; (3) after the deskewed crop is pasted, the
+    ENTIRE background outside the placed picture rect(s) is set to clean paper, then the
+    credit column / page numbers are restored on top from whp_text -- so NO stray art line,
+    scan-gutter shadow, speckle ring or fringe survives in the margins; (4) a conservative
+    _trim_dirty_edges trims a thin dirty rim (dark gutter line / paper overshoot) off each
+    crop edge, capped, only when the rim is clearly different from the art just inside.
+    Verified: p044/p043 clean white margins, art intact; p035/p037/p050 margins clean and
+    credit columns preserved. HONEST REMAINING ITEM: a DARK painting whose edge blends into
+    a dark scan-gutter (p035 clowns, p050 wizard top) can still show a thin dark edge line
+    -- brightness can't separate gutter from dark art there; needs a gutter detector off the
+    original page boundary. Everything else (grey bands, speckle rings, white blocks) is gone.
+
+  - NEW v37 — WHITE-RECTANGLE-IN-ART BUG FIXED + FULL-BLEED BYPASS REMOVED (deskew_crop.py).
+    (1) WHITE BLOCKS (p043, p044): _place_logo_straight was FALSE-DETECTING a wide dark art
+    mass in the top band (a demon, a dark painting edge) as a tilted "banner", then erasing
+    that footprint to paper -> a white rectangle punched INTO the art. Added two ANTI-ART
+    gates: the candidate's TOP EDGE must be a CLEAN STRAIGHT line (robust line-fit residual
+    <= 0.006*H) and its bar HEIGHT must be UNIFORM across the width (per-column span
+    std/median <= 0.7). A printed banner passes both; ragged/variable art is rejected.
+    Verified: p044 interior-white 4.99%% -> 0.26%%, p043 block+seam gone, art intact; the
+    real award banners are level in this batch so leaving them untouched is harmless.
+    (2) The v35 FULL-BLEED whole-page-rotate BYPASS was REMOVED at the user's instruction --
+    all art pages go through the cut/erase/paste (detect -> deskew -> deep-crop -> erase
+    footprint -> paste) path again. The v36 profile fix + v35 _bg_texture saturation guard +
+    clean-paper-preserving frame-erase keep that path free of the old chevron/crop damage.
+    STILL OPEN (honest, NOT yet fixed): residual SKEW on soft-edge full-bleed pages where the
+    deskew angle reads ~0 because there is no clean art-vs-paper border to fit (p007/020/024
+    top edges only partly squared); the compose_multi BLACK-SPECKLE ring around placed
+    pictures; and art_pictures RECALL (p045 three plates read as one -> blue plate split).
+    These need: a content-based whole-page skew estimate to feed the per-plate deskew, a
+    connected-fringe clean on the multi path, and better multi-plate recall.
+
+  - NEW v36 — PAPER PROFILE NO LONGER POISONED BY FULL-BLEED PAGES (build_paper_profile
+    + _page_whitepoint in deskew_crop.py). ROOT CAUSE of the "can't distinguish art" run
+    on Spectrum 8: the profile was built by sampling the border RING of EVERY staged page
+    as "paper". Most of that batch is full-bleed art, whose ring IS art, so those pages
+    injected art saturation/darkness into the envelope -> s_max=211 / dv=70 (garbage).
+    With those bounds the art test  (val < wp-dv) | (sat > s_max)  only fired on near-neon
+    or very dark pixels, so every MUTED / DESATURATED / DARK painting (the noir figure,
+    the B&W clowns, the pale-figure p036, the blue-sky p045) was read as PAPER and then
+    shifted / split / white-banded / speckle-ringed. THE FIX:
+      * build_paper_profile now samples each page only from its BRIGHT, LOW-SAT paper-like
+        ring pixels (V>190, S<75) and SKIPS any page whose ring is mostly art (too few
+        paper-like pixels) -- so a full-bleed page can no longer move the bounds. Tinted
+        stock still contributes (beige/yellow/blue are bright + only mildly saturated).
+        Slack trimmed (+30 sat / +26 val) now that the sample is clean. Falls back to a
+        sane default {s_max 60, dv 45} if a batch has no clean-margin page. Reports n_paper.
+      * _page_whitepoint is robust on a full-bleed page: if the margin isn't bright paper
+        it uses the brightest low-sat pixels anywhere as the white reference, instead of
+        anchoring to a dark art margin (which made dark full-bleed art read as paper).
+    EFFECT on Spectrum 8: profile 211/70 -> 99/55 (built over 43 clean-margin pages of 49);
+    p036 now detects as art and takes the full-bleed route (was shifted with white margins
+    -> now full and correct); p039/p037 pictures detected and placed cleanly; full-bleed
+    singles (p007 etc.) unchanged/clean. Re-rendered the whole batch (47 outputs).
+    STILL OPEN (separate from the profile): a GENUINE multi-artwork page can still be
+    detected as 1 panel (p045 -> "1 panel"; its blue-sky plate is split by the single-art
+    compose), and the compose_multi BLACK-SPECKLE ring around placed pictures (p035 top)
+    remains. Both are art_pictures-RECALL / multi-compose items, not the profile bug --
+    next steps: raise art_pictures recall on muted side-by-side plates, and add the
+    connected-fringe clean to compose_multi (erase only fringe joined to a picture edge,
+    never low-sat caption text).
+
+
+  - NEW v35 — FULL-BLEED ART NO LONGER CROPPED OR PATCHED (deskew_crop.py:
+    compose_fullbleed full-bleed route + _bg_texture saturation guard + _paper_white +
+    clean-paper-preserving frame-erase). THE BUG (Spectrum 8 batch): on near-full-bleed
+    paintings (art fills the page, only a thin scanned margin / page number around it)
+    every page came out with (a) the art bitten in on ALL sides -- real art lost -- and
+    (b) yellow chevron PATCHES sprayed into the thin margins. CAUSES:
+      1. the FULL_BLEED path always ran detect-rect -> inward inset-crop (margin_frac
+         1.5%/side) -> erase footprint -> frame-erase (3.5% ring) -> _bg_texture fill.
+         On a plate WITH wide white margins that ring lands on paper (invisible); on a
+         FULL-BLEED page it eats the art edge and repaints the narrow margin with grain.
+      2. _bg_texture(paper=True) scored only brightness+uniformity, so on these colourful
+         pages it sometimes sampled a faintly-yellow patch and mirror-tiled it -> the
+         yellow chevrons (mirroring any diagonal streak makes chevrons).
+      3. the batch profile went degenerate (s_max 211 / dv 70) because the staged set is
+         mostly full-bleed art, widening the art/paper gates and making it worse.
+    THE FIX:
+      * FULL-BLEED ROUTE: if the detected art bbox covers >80% of BOTH page dimensions
+        with >0.55 coverage (and not centring), the page is treated as one full-bleed
+        artwork: the WHOLE page is deskewed by the reliable angle and EVERY pixel kept --
+        no inset, no footprint erase, no frame-erase, no margin texture -- with only the
+        small rotation-gap corners filled by clean margin paper (_paper_white: bright,
+        low-sat border-ring colour). Plate pages with real margins and text-column pages
+        fall through to the existing detect-and-place path, unchanged.
+      * _bg_texture(paper=True) now PENALISES saturation, so the sampled paper patch is
+        genuinely low-sat white -- never a yellow/colour patch -> no more chevrons.
+      * the FULL_BLEED frame-erase now LEAVES clean paper (L>212, sat<40) untouched and
+        only wipes actual orphan art fringe, so thin margins around a plate are never
+        turned into grain patches.
+    Verified on Spectrum 8 p007/p030/p042/p015 (full-bleed): art restored to full size,
+    chevron patches gone, margins clean, banner/credits preserved; plate+text p045 and
+    the multi pages no longer chevroned. Re-rendered the whole batch (47 outputs) clean.
+    HONEST OPEN ITEM: MULTI-PICTURE pages (compose_multi) can still leave a thin BLACK
+    SPECKLE ring around a placed picture (original dark art fringe just outside the inset
+    crop; e.g. p050 top painting). It is NOT the chevron/crop bug and is confined to the
+    multi path. A safe per-picture frame-clean (erase only fringe CONNECTED to the picture
+    edge, never low-sat caption text) is the next step -- do not add a blanket frame-erase
+    to compose_multi, it would eat caption text. Also: a few genuine multi-artwork pages
+    (e.g. p045) are still detected as 1 panel; improve art_pictures recall there.
+
+
+  - NEW v34 — WIDE LOGO BANNERS NO LONGER STRAIGHTENED IN HALF (deskew_crop.
+    _place_logo_straight, with new helpers _banner_ink / _fill_holes / _banner_blob).
+    THE BUG: a wide AWARD banner ("GOLD AWARD EDITORIAL" -- the "GOLD AWARD" white box
+    + an "EDITORIAL" dark colour block + a continuous underline) came out CUT IN HALF:
+    the left part level, the right part still tilted, with a hard vertical seam (see the
+    user's broken_tilt.jpg). TWO causes, both in the v32 logo straightener which was only
+    ever tuned/verified on the SHORT, near-straight "SPECTRUM 4 BOOKS" header:
+      1. it blanked everything past 0.55*W ("logos are top-left, keep art out"), which
+         literally sliced a wide banner in two -- only the left <=0.55W slice was
+         reclaimed+levelled; the rest kept the tilted composite (the seam);
+      2. it gated the banner on BOUNDING-BOX height (h < 0.05H). A wide banner tilted a
+         few degrees has a TALL bbox (box_height + width*tan(angle)), so the gate
+         rejected it outright on some pages.
+    THE FIX (full banner, one unit):
+      * art is kept out STRUCTURALLY, not by a fixed cut. The seed banner is the
+        strongest WIDE THIN BAR in the top band, "thin" measured by the MEDIAN PER-COLUMN
+        ink span (~the box height), which is TILT-INVARIANT -- a tilted wide banner still
+        reads thin per column, while a painting reaching into the band fills it and is
+        rejected. No 0.55*W blanking.
+      * the banner's TRUE horizontal extent is found by walking its own row-band left and
+        right along columns carrying banner ink (the box/underline keep it continuous),
+        stopping at the wide paper gap before any side art -- so the FULL banner is taken
+        and a real right-side painting is still never touched.
+      * the whole banner is reclaimed from the whitened ORIGINAL as ONE connected blob
+        (a generous close bridges letters to the box+underline; holes filled so the
+        colour block / box interior are solid; credit lines below are a separate
+        component and excluded), the blob is levelled by the banner's own top-edge tilt,
+        the tilted version is erased (slightly dilated, so the soft anti-aliased fringe
+        goes too) and the levelled banner dropped back. Only the banner footprint is
+        touched -- neighbouring credits/art are left intact.
+    Verified on reconstructions of the failure mode (wide tilted "GOLD AWARD EDITORIAL"-
+    style banner past 0.55*W, with a side painting and a credit block): banner -3.4 deg ->
+    0.0 deg as a single straight unit, no seam, no ghost; side art and credit block
+    changed 0%. Regression-checked: the short "SPECTRUM 4 BOOKS" header still straightens
+    (-2.8 -> 0.0), an already-straight banner is a no-op, and a full-art page with no
+    banner is returned 0% changed (the painting is tall -> rejected by the span gate).
+    NOTE: verified on faithful SYNTHETIC reproductions of the banner, NOT yet on the real
+    Spectrum 4 award page scan (only the broken OUTPUT crop was supplied, not the source).
+    Stage the real award SOURCE scan and re-run to confirm before a bulk run.
+
+
+  - NEW v33 — DESPECKLE UPGRADED (in _despeckle_paper) to two stages, both unable to
+    touch art:
+    (1) ISOLATED-SMUDGE REMOVAL now catches the faint grey smudges too (down to ~12 L
+        below local paper, up to ~70 px), removing only LONE marks that don't touch a
+        glyph (~10 px protection) and don't line up into a text row -- so punctuation and
+        faint text rows are protected; paper-zone only, never art.
+    (2) DARKEST-POINT CUT (keep darkest 60%), CREDIT TEXT ZONES ONLY: inside the dense
+        small-text credit blocks (found by _credit_text_zone, same structural detector as
+        the credit reclaim), the darkest ink D and paper Wp are measured and every pixel
+        lighter than D+0.60*(Wp-D) is set to clean paper -- wiping residual grey haze and
+        crisping the text without thinning it. Confined to credit blocks, so PALE ART
+        surrounding the text is never cut (verified p075 pinup: zone=0 px, art untouched;
+        p064: clean white credit blocks, text full-weight). 60% chosen from the dial test
+        (40% and below began thinning the light italic labels).
+
+  - NEW v32 — (a) LOGO STRAIGHTENING and (b) SPECKLE REMOVAL, both in deskew_crop.py and
+    called at the end of compose_fullbleed and compose_multi.
+    (a) _place_logo_straight: the section-header LOGO ("SPECTRUM 4 BOOKS / INSTITUTIONAL /
+        ...") is a wide dark+green BOXED banner in the top band. It is essentially STRAIGHT
+        in the source (p064: 0.09 deg) but the page compose TILTS it (p064 recon: 3.21 deg).
+        The banner is detected in the top-left of the top 13% band (wide, short, dark-or-
+        green, w>4h), its tilt read from the clean top border line, and it is reclaimed from
+        the whitened ORIGINAL -- levelled if the source itself is tilted -- and dropped back
+        straight, erasing the tilted version. Verified p064: logo 3.21 deg -> 0.01 deg,
+        green BOOKS letters restored crisp; as a bonus it also straightens/cleans the
+        "SPECTRUM 4 INSTITUTIONAL" header on the credit pages. Ordinary art pages have no
+        such banner -> detector returns None, page untouched (p075 unaffected).
+    (b) _despeckle_paper: removes ISOLATED tiny dark specks (scanning dust) sitting on
+        paper, WITHOUT risking text. A speck is removed only if tiny (<=7 px, <=5x5) AND has
+        NO glyph within ~8 px -- so periods, i/j dots, commas and quotes (always adjacent to
+        a glyph) are protected; it only acts where the local background is paper, never on
+        art, and fills each removed speck with the local paper colour. Verified: credit text
+        and punctuation fully intact, background cleaner; art pages unaffected.
+
+
+  - NEW v31 — CREDIT-BLOCK RECLAIM (fixes the false-art off-white strip + doubled text +
+    grey seam in the credit column on institutional/index pages; p100, p106 were the
+    focus). deskew_crop._reclaim_credit_blocks, called at the end of compose_fullbleed and
+    compose_multi. WHY it was wrong: art_pictures merges the credit column into one big
+    "art" panel, so that column was pasted back as a DESKEWED art crop -- an off-white
+    strip that was never whitened, with the scanned credits baked into it; the v30 text-
+    restore then wrote the faithful text on top, giving doubled text on a grey band (worst
+    on p100). FIX: a credit block is detected structurally as a DENSE, TALL cluster of
+    small GRAYSCALE text (text-density ~0.14 vs ~0.02 for a stray caption over art; art --
+    even pale art like white tights or light sky -- never forms one because it sits in a
+    colourful neighbourhood and has no dense small-text rows). Where such a block exists,
+    its box is overwritten with the WHITENED ORIGINAL (clean paper + the single faithful
+    text), which removes the false-art strip AND the doubling in one step; a light unsharp
+    then crisps the fuzzy text edges. Verified: p100/p106 credit columns clean, single,
+    crisp, header intact, art untouched. CONTROL plates (p075/077/083/085/095/099/113)
+    detect ZERO credit blocks and are changed 0% -- pale/light art is safe. Earlier
+    brightness/saturation-only attempts were abandoned precisely because they blew out
+    pale art; the density-of-small-text gate is what makes this safe. Ordinary plates with
+    no credit block are left untouched.
+
+
+  - NEW v30 — LIGHT-PAGE TEXT IS NO LONGER DAMAGED (speckle / blobs / superimposition
+    / column tearing all fixed). Three changes, all "just straighten the art, leave the
+    text as scanned":
+      1. SAFE_TEXT = True (default): the FULL_BLEED path no longer runs
+         text_blocks.straighten_paragraphs with stamp='ink', wipe=True. That ink wipe/
+         restamp was re-inking the scanned caption text -> blobby/speckled glyphs (worst
+         on p114) and on some pages stamped art-region text over the caption (p112/110/
+         106). Skipped now; the original scanned text rides through on the whitened page.
+      2. CENTER_SINGLE = CENTER_MULTI = False (default): the straightened art is left in
+         its own position instead of being re-centred. On institutional pages the art is
+         wide and centring shifted it LEFT onto the credit column, covering/“tearing” the
+         text. (Toggle back on for single-plate sections with no text column if wanted.)
+      3. deskew_crop._restore_page_text (called at the end of compose_fullbleed and
+         compose_multi): ROOT-CAUSE backstop. art_pictures over-detects one big rectangle
+         that swallows the left credit column + header (e.g. p106 (138,94,2625,3479)), so
+         the art region is laid over the background where the text lives. After the art is
+         placed, this repaints the FAITHFUL scanned text (locally-dark, low-saturation ink)
+         back wherever the composed page is currently PAPER-bright -- i.e. wherever no real
+         art covers it. Credit columns, page numbers and the boxed "SPECTRUM 4
+         INSTITUTIONAL" header come back verbatim; it NEVER paints over real art (those
+         spots aren't paper). Nothing is re-rendered, thickened, OCR'd or invented -- the
+         original glyphs are copied. Verified on p106/110/112/114: credit text intact and
+         legible, no speckle, no blobs, no tearing; art straightened. Where a source line
+         is too smeared to improve it is left as-is, not guessed.
+    OPEN: art_pictures still MERGES the separate pictures + text column into one panel on
+    these pages (so they run as "1 panel", not true multi). The restore backstop makes the
+    text correct regardless, but a cleaner per-picture split is still worth doing later.
+
+
+  - NEW v28 — MARKUP/ORIGINAL PAIRING NOW STRIPS "- Copy" DUPLICATE SUFFIXES.
+    _normstem() paired a markup with its clean original by normalised stem but only
+    knew the __N_/(N)/_orig/_clean/_mag tags. A markup saved as the OS duplicate
+    "<name> - Copy.jpg" (browser-uploaded as "<name>_-_Copy.jpg") normalised to a
+    DIFFERENT stem than "<name>.jpg", so the pair did NOT pair: the markup fell
+    through to auto-detection (no keep-black, magenta ignored) and the original was
+    processed standalone. v28 strips the Windows/browser " - Copy" / "_-_Copy" /
+    "- Copy (2)" and macOS " copy" / " copy 2" forms too, looped until stable, so a
+    "<name> - Copy.jpg" markup + "<name>.jpg" original pair automatically. Ordinary
+    page names ("..._Image_0001") are unaffected. Verified: Spectrum 4 p017 dark
+    pair (markup "_-_Copy" + clean original) pairs -> 7 magenta boxes drive the v26
+    DARK keep-black chain. Use the supported _mag tag OR a "- Copy" duplicate; both
+    pair now.
+
+  - NEW v29 — DARK MAGENTA PATH FULLY REBUILT (text out -> straight art on guides ->
+    uniform dark page -> drop art -> straighten text -> drop, in THAT order).
+    dark_art.reconstruct_dark_art_with_boxes now:
+      1. rectifies each plate from its magenta box keyline (unchanged -- this always
+         worked; do not touch it);
+      2. SYNTHESIZES one uniform dark page from the real page-ground colour + matching
+         grain (_uniform_dark_page, seeded so output is reproducible). Anything that is
+         NOT art-in-a-guide and NOT text is background and is wiped to this uniform dark
+         -- gloss blobs, page sheen, edge bleed all GO;
+      3. drops the straightened plates onto it;
+      4. straightens the PAGE TEXT and drops it back (_straighten_and_drop_text):
+         * text is found by _page_text_mask: bright-on-dark with HIGH LOCAL STROKE-EDGE
+           DENSITY (so a smooth gloss/sheen blob, however big, is NOT text), minus the
+           EXACT art-box footprints only. The guide gives art geometry and is NEVER used
+           to gate text -- a caption sitting right under a plate (e.g. "Best Interior
+           Illustration") is kept, not blacked out;
+         * text is segmented into BLOCKS connected horizontally within a line but split
+           across wide horizontal gaps, so two captions side-by-side at the same height
+           (e.g. Monochrome on the left, Tom Kidd on the right) are straightened
+           INDEPENDENTLY -- a shared row-band fit used to average them into a tilt;
+         * each block is deskewed by its BASELINE angle (_baseline_angle: per-column
+           lowest pixel, robust). The all-pixel slope was inflated by italics to ~7 deg
+           and tilted level lines; the baseline reads the true ~2 deg;
+         * the block is rotated on the FULL canvas about its own centroid (nothing
+           clipped) and blended by brightness gated to its glyph region -> thin, whole
+           letters, no blobs, no speckle, ONE copy (no ghost), each on its own rows (no
+           overlap). Real scanned glyphs, only straightened -- NO OCR, nothing invented.
+    Verified on Spectrum 4 p017 (THE CHESLEY AWARDS, 7 plates): plates squared on a
+    uniform black ground; title + underline crisp; intro + all 7 captions + award block
+    straight and clean; gloss blob gone; the one near-black source line left faithfully
+    faint (not fabricated). The auto dark path (reconstruct_dark_art, no boxes) still
+    uses the older text_bands/_drop_text and is unchanged.
+
+  - NEW v29 — SAFE_TEXT flag introduced (see the consolidated v30 light-page entry at
+    the top; the column-tearing it flagged as open was fixed in v30 by centring-off +
+    _restore_page_text).
+
+  - NEW v27 — DELIVERABLE RULE TIGHTENED: NO SAMPLES. The deliverable is the full
+    set of per-page *_reconstructed.jpg (or one zip of all of them), nothing else.
+    Do not produce/copy/"present" a few representative SAMPLE or preview pages, and
+    do not ask the user whether they want samples -- run the whole batch, zip it,
+    ship the zip. Internal QC crops may be inspected during verification but are
+    never delivered. (User instruction; see the NO SAMPLES note in the header.)
+
+  - NEW v26 — MAGENTA ON A DARK PAGE NOW KEEPS THE BLACK. magenta_dewarp ALWAYS
+    whitens (paper=True), which is correct for paper pages but WRONG for art-on-
+    black. v26 fixes the routing in reconstruct.py: when a paired magenta markup's
+    CLEAN ORIGINAL classifies as DARK_BG, its boxes drive the keep-black chain
+    dark_art.reconstruct_dark_art_with_boxes(orig, boxes) instead of magenta_dewarp.
+    That chain: read each box's tilted top/bottom edges from the bright KEYLINE
+    across the FULL box width (so a near-black art interior still rectifies) ->
+    vertical-rectify -> crop to a perfect rect 5px in -> inpaint the REAL dark page
+    bg over the whole box footprint -> place the plate (single box centred
+    horizontally, vertical kept; multi in place) -> drop header/caption back
+    DESKEWED. Light/paper magenta pages are unchanged (still magenta_dewarp).
+    Verified on Spectrum 20 p036 with its magenta box: dewarped, keep-black, full
+    art, header+caption levelled. This is the reliable route for the dark plates --
+    draw a magenta box per plate, stage it with the clean original, re-run.
+
+
+  - NEW v25 — SHORT-TEXT DESKEW on the LIGHT (FULL_BLEED) path. The light path
+    already deskewed 3+ line PARAGRAPHS (text_blocks.straighten_paragraphs). v25
+    extends the SAME tested baseline-deskew + wipe/restamp path to SHORT text
+    (1-2 line captions, headers, single credit lines), which previously rode along
+    in the whitened page at its original scan skew. Implementation is additive:
+      * text_blocks.find_blocks / straighten_paragraphs gained min_lines + max_lines
+        params (defaults unchanged, so the existing 3+ pass is identical to v24).
+      * text_blocks._regular_short gates 1-2 line blocks on plausible glyph height
+        (+ height consistency for 2 lines), and the saturation guard still drops any
+        colourful region, so a plate can never be mistaken for a caption.
+      * reconstruct.py FULL_BLEED runs a second pass (min_lines=1, max_lines=2)
+        after the paragraph pass, behind the DESKEW_SHORT_TEXT toggle (default True).
+    NOTE: this was NOT verifiable on a real light-bg page in the session it was
+    built (no light samples staged). VERIFY on one light page before a bulk run;
+    set DESKEW_SHORT_TEXT=False to restore exact v24 behaviour.
+
+  - NEW v25 — dark_art.py: an experimental DARK-BG art-box reconstruction chain
+    (lightness+colour-vs-page detect -> vertical rectify -> crop to a perfect rect
+    -> inpaint the real page bg -> centre the art HORIZONTALLY (vertical kept) ->
+    drop text back deskewed). The downstream chain is sound (proven on Spectrum 20
+    p036 with a user magenta box). Its AUTO art-box DETECTOR is NOT reliable across
+    varied plates (warm/cool/near-black/full-bleed) and is NOT wired into the live
+    dark branch — the working v24 compose_dark path is unchanged. Use dark_art with
+    a MAGENTA-supplied box per the project's magenta convention for trustworthy
+    output; do not rely on its standalone auto-detection.
+
+
+  - ART-ON-BLACK IS DEWARPED EXACTLY LIKE A LIGHT-BG PAGE (v24, compose_dark).
+    The light-bg path fits the art rectangle's own border, deskews off it, and
+    deep-crops to a crisp axis-aligned rectangle. v24 does the SAME on a black
+    ground, KEEPING THE BLACK:
+      * _art_component_dark: the art = pixels whose colour differs from the
+        page-margin colour (sampled from the edge ring) by > T in Lab. (Dark-
+        polarity twin of the light _art_component.)
+      * _dark_edge_angle: skew fit ROBUSTLY from the art's 4 border edges (first/
+        last art pixel per row/col, outlier-rejected line fits), median of the
+        edges that fit cleanly -- so the art's irregular interior never pollutes it.
+        This finds real skew the old per-box deslope missed: 217 +1.85, 216 -1.37,
+        041 +4.74; already-straight plates read ~0 (037, 181, 106, 305) and are
+        left alone.
+      * compose_dark: keep the ORIGINAL page as the base (black ground, header,
+        caption all stay), repaint ONLY the art's footprint with grain SAMPLED from
+        the page's own dark ground, then place the deskewed + deep-cropped art back
+        on it. No off-white, no ground replacement, gaps filled with real dark grain.
+    HONEST OPEN ITEM: this corrects ROTATION + deep-crop. The magenta edges suggest
+    some plates also carry mild KEYSTONE/perspective (top vs bottom edge angles
+    disagree, e.g. 217). A 4-corner perspective rectification (close_triangles twin)
+    is the next step if the rotation+crop is not enough.
+
+
+  - ART-ON-BLACK: KEEP THE BLACK GROUND, DEWARP THE ART, PAINT ONLY THE GAPS
+    (v23). The job on an art-on-black page is the SAME as a white-bg page -- dewarp
+    the art -- but the GROUND IS KEPT, never replaced. The earlier off-white output
+    and any background replacement are REMOVED. How the DARK_BG branch works now:
+      1. page_skew_dark(img) measures the page rotation from its own horizontal
+         structure (white-text baselines weighted 3x, plus edges) via a projection
+         profile -- because on a black ground there is no art-vs-paper border to fit
+         a line to. This straightens the ART and every text line together.
+      2. The page is rotated by that angle. The ORIGINAL DARK GROUND is kept as-is;
+         the ONLY pixels changed are the triangular ROTATION-GAP corners the
+         rotation opens at the edges, which are filled with grain SAMPLED FROM THE
+         PAGE'S OWN DARK GROUND (_bg_texture(paper=False)).
+      3. One file out: <stem>_reconstructed.jpg. No off-white, no white slab, no
+         box-cropping that deletes ground, no dark patches punched into the art.
+    The branch also reports whether the page carries one picture or several.
+    HONEST LIMIT: these plates are near-full-bleed, so the measured scan skew is
+    small (0-2.2 deg here; 037=0, 216=-2.2, 217=+1.0, 305=+0.8). The pipeline
+    applies exactly that and no more -- it does NOT rotate an artwork's own
+    composition (a profile drawn at an angle, leaning trees); that is not scan skew.
+    DO NOT re-introduce an off-white/background-replacement output -- it was removed
+    on purpose.
+
+
+  - ART-ON-BLACK IS NOW ACTUALLY DEWARPED (v22, page_skew_dark + rewritten DARK_BG
+    compose). THE BUG IT FIXES: on a black ground there is no art-vs-paper border,
+    so the per-box deslope (_reliable_angle) read ~0 and the art was shipped still
+    skewed -- e.g. p216 was tilted -2.2 deg, p217 +1.0, p305 +0.8, and the old path
+    "corrected" them by 0.0-0.3 (sometimes the wrong sign). THE FIX: estimate the
+    true PAGE skew from content -- white-text baselines (weighted) + edges, scored
+    by projection-profile sharpness over trial rotations -- and rotate the WHOLE
+    page by it. One rotation straightens the ART and every text line together. The
+    art picture(s) are then identified (single vs multi) on the straightened page.
+    The reconstruction is the deskewed page itself: the art dewarped, all text
+    level, the header + caption preserved, the ORIGINAL DARK GROUND KEPT, and only
+    the rotation-gap corners filled by grain sampled from that same dark ground.
+    One file out per page (<stem>_reconstructed.jpg); there is no off-white output.
+    NO GHOSTING: because we build from the deskewed page, there is no leftover
+    warped text under the straightened text (the v21 per-block stamp could double
+    it). Verified on all 8 black samples: p216 -2.2 / p217 +1.0 / p305 +0.8 visibly
+    straightened, near-square pages barely moved, headers + captions intact, the
+    p305 back-cover paragraphs level and clean.
+    Console prints, per dark page:  art single|multi (N pic), deskew <deg>, and how
+    many text blocks were straightened.
+    LIMITS (honest): this corrects whole-page SKEW (a single rotation), not strong
+    page CURL (different paragraphs bowing at different angles) -- none of the
+    samples needed it; if a curled dark page turns up, a per-region pass would be
+    the next step. Multi-picture identification triggers when 2+ separated art
+    masses are found; all 8 samples are single.
+
+  - PARAGRAPH TEXT BLOCKS beside a PALE plate (v21, text_blocks.py) remain handled
+    on the FULL_BLEED path: a 3+ line paragraph is detected (height-consistency
+    guard rejects art texture -- see p036), its footprint is PAINTED OVER to local
+    paper, and the deskewed dark text is stamped back (no overlap, no crop). Short
+    ragged 2-3 line plate credits at the threshold may stay as-is (preserved, not
+    independently straightened).
+
+
+  - TEXT DETECTED BY STRUCTURE, NOT COLOUR (v20, classify_page + text_structure):
+    the old TEXT gate keyed on "no colour" (art_pct<8 AND mean_sat<30). Any text
+    page carrying a colour artwork inset, or on warm/tinted paper, failed that gate
+    and was mis-routed -- Spectrum-20 essay pages 14-18 (mean_sat 30-38, art_pct
+    8-16) each had 36-63 detected text lines yet were sent to FULL_BLEED (014/016)
+    or dropped as SKIP on a knife-edge ink% (015/017/018). text_structure(gray)
+    now decides TEXT positively: binarise -> horizontal RLSA close -> count the
+    LINE-SHAPED connected components (wide, short, high aspect, well filled) and
+    the page-area fraction they cover. Text pages score 53-72% area / 150-180 lines;
+    art plates score <3% / 9-15 -- a 20x separation with NO colour dependence. Gate:
+    text_frac>0.30 AND lines>=20 -> TEXT, checked before the FULL_BLEED/SKIP
+    coverage tests. The function takes dark_text=True (dark ink on light paper) or
+    dark_text=False (white text on dark) so the SAME structure test is ready for a
+    future white-on-black TEXT path; only the binarisation polarity differs.
+    Verified: 14-18 -> TEXT (cleaned _text.jpg with their art insets + Requiem list
+    kept); real plates 026/052/069 unchanged (FULL_BLEED); 010/012/008 -> TEXT.
+
+  - ART-ON-BLACK, GLOSS-TOLERANT (v20, classify_page dark_ground_stats +
+    DARK_BG detect + dual compose). Three problems on art-on-a-black-ground pages
+    are handled:
+      * GLOSS defeats a corner luminance test (a glossy reflection in a corner reads
+        bright). p036 corner=82, p305 corner=100 -- both truly black-ground -- slipped
+        the old  corner<80  gate (036 then tore in the art path; 037 kept its corner
+        but the dark compose erased its caption). dark_ground_stats() decides on the
+        EDGE-RING instead: median luminance + dark-fraction over the outer ring. A
+        black-ground page has a dark, mostly-consistent margin all round and gloss
+        only brightens a MINORITY of the ring, so the median/fraction stay dark.
+        Gate: ring_median<60 AND >55% of ring dark -> DARK_BG. Verified: all 8 test
+        pages (Spectrum-20 036/037/216/217, Spectrum-22 041/106/181/305) -> DARK_BG,
+        ring medians 14-43, including the two the corner test missed.
+      * DARK ART ON DARK GROUND (the foreground's own colours are as dark as the
+        ground -- e.g. the Spectrum-22 p106 xenomorph). A brightness cut cannot
+        separate them, so detect_panels(DARK_BG) builds a POSITIVE art mask from
+        cues the smooth ground lacks: clearly-brighter-than-ground OR coloured
+        (sat>55) OR textured (Canny edge-density), minus the white caption band and
+        the thin dark edge-margin ring, then takes the central mass (split pieces
+        merged). Verified: 106 dark-on-dark art held together; all 8 -> 1 clean plate.
+      * WHITE CAPTION FLOATING IN THE DARK is now PRESERVED (white_caption_mask):
+        the bright credit line / award header on the ground is detected and written
+        back onto the canvas -- fixing v19's lost "Charles Vess" (p037). Kept as
+        white on the dark ground.
+    [SUPERSEDED in v23] Earlier builds (v20-v22) also emitted a second
+    <stem>_reconstructed_offwhite.jpg that dropped the dark ground onto white. That
+    output was REMOVED in v23 at the user's explicit instruction -- keep the BLACK
+    ground, do not replace it with white. Do not bring the off-white output back.
+    STILL NOT DONE -- WHITE-ON-BLACK *TEXT* PAGES: a dark page that is structurally
+    white TEXT (not art) currently routes to DARK_BG (treated as art). The structure
+    detector is polarity-ready (dark_text=False), but the dark-text RENDER path
+    (deskew + keep dark ground + preserve white text, NO whitening) is not built --
+    add and test it on a real white-on-black text page before trusting it. Do NOT
+    import a white-text bleed step from another project.
+
+  - IO PATHS ENV-OVERRIDABLE (v20): INPUT_DIR/OUTPUT_DIR honour $DEWARP_INPUT /
+    $DEWARP_OUTPUT if set (default to the usual work/input, work/output). Lets a
+    side batch (e.g. a black-bg test set) run without editing the file.
+
+
+  - MULTI-PAGE CONTENT CENTRED (v19, CENTER_MULTI=True -> compose_multi
+    center_content=True): on a multi-picture page, after every plate + caption is
+    placed, the WHOLE content block (pictures + caption columns + headers +
+    plate/page numbers + footer) is rigidly centred within the page margins, so the
+    layout sits with even margins instead of being pushed to one side by the scan /
+    binding gutter. The block moves as ONE unit (relative positions unchanged); it
+    is cut and re-pasted centred on fresh _bg_texture paper, leaving no ghost at the
+    old footprint and clean paper in the freed margins. The content bbox is the
+    union of (a) the KNOWN placed-picture rectangles -- exact, so a pale sky or light
+    passage inside a picture is never dropped by a per-pixel test -- and (b) the
+    caption/footer text, detected as non-paper OUTSIDE the pictures and OUTSIDE a
+    thin page-edge band (so binding-edge streaks and corner flecks never drag the box
+    to the border). Auto multi pages only: the manual magenta/clip path is left as
+    authored (compose_multi center_content defaults False), and SINGLE-picture pages
+    keep the v18 single-picture centring (CENTER_SINGLE). Verified across the
+    Spectrum-3 multi pages: margins balanced (e.g. 078/082/094/107/117/121 even L/R
+    + T/B). NOTE: a page whose only large art is one picture plus a SMALL second
+    image the detector misses (e.g. p105) is classified single, so it uses
+    single-picture centring, not this -- improve art_pictures recall if that matters.
+
+
+  - SINGLE-PIC PAGES CENTRED (v18, CENTER_SINGLE=True -> compose_fullbleed
+    center=True): on a single-picture FULL_BLEED page the cleaned art is placed at
+    the PAGE CENTRE (equal left/right and top/bottom margins) instead of its
+    scanned position, fixing the binding-gutter shift and the empty band art-annual
+    plates leave below the picture. Page furniture (award header, caption block,
+    page/plate number) stays where it is in the whitened canvas -- only the picture
+    moves; the original footprint is still erased so no ghost is left at the old
+    spot (verified clean white, sat 0, above the moved art on p088). Multi-picture
+    pages are NOT centred -- each plate keeps its own page position (layout matters).
+    Because moving the art EXPOSES the erased old footprint, the fill for centred
+    pages is the PAGE WHITE sampled from the whitened margins (80th pct of the
+    margin ring), NOT _bg_texture: _bg_texture can sample a grey/vignette patch
+    (~190) that would read as a dingy rectangle against the ~245 page, so the
+    margin-matched fill blends it in. (Toggle off with CENTER_SINGLE=False.)
+    Verified across the Spectrum-3 batch: 072/074/090 centre cleanly, 088's grey
+    band is gone and its art sits centred at 18-82%.
+
+
+  - MAGENTA ONLY FOR DUPLICATE PAIRS (v17, reconstruct.py): magenta detection now
+    runs ONLY on pages that have a DUPLICATE-STEM partner (the same page staged
+    twice, one WITH magenta and one WITHOUT). The magenta workflow needs both
+    copies (boxes from the markup, pixels from the clean original), so a page with
+    a UNIQUE stem can never be a valid markup -- it is NEVER checked for magenta
+    colour and goes straight to normal processing. The old per-page has_magenta()
+    call in the main loop is gone; magenta is driven entirely by the duplicate-pair
+    pre-pass (which only decodes >=2-file stem groups). Effects: (1) ordinary
+    batches of unique pages pay nothing for magenta and can never be false-flagged
+    (a clean page with red/pink paint is simply never tested); (2) a markup is
+    reconstructed from its paired clean original (_orig_for); (3) a markup in a
+    duplicate group with no matching clean original is refused (boxes saved, ask for
+    the original). Verified: a lone clean page (p090) processes as a normal
+    FULL_BLEED plate with no magenta check; a 046 markup+original pair still pairs
+    and dewarps (3 boxes). NOTE: to use magenta you MUST send the pair -- a lone
+    magenta markup (unique stem) is treated as an ordinary page, not a markup.
+
+
+  - MARKUP DETECTOR HARDENED (v16, magenta_crop.magenta_boxes gates): a clean page
+    that merely CONTAINS red/pink/magenta paint (e.g. a red tablecloth) could form a
+    closed magenta-hued loop and be mis-read as a hand-drawn markup -> then refused
+    for "no original" (seen on the Spectrum-3 Swamp-Thing photo p090). A candidate
+    magenta loop is now kept only if it looks like a real hand-drawn ART BOX:
+      min_area_frac=0.03  enclosed area >= 3% of page   (real markups >= 12%)
+      min_dim=0.15        each side >= 15% of page        (real markups >= 26%)
+      min_rect=0.80       hole FILLS its bounding rect     (drawn rect ~0.95+;
+                          incidental art-enclosed hole ~0.6 -> rejected)
+    A page failing the gates yields 0 boxes -> not a markup -> normal auto-detection.
+    Verified: 042/046 real markups keep all 3 boxes each; p090's blob (8x12%,
+    areafrac 0.01, rectangularity 0.61) is rejected and p090 reconstructs as a normal
+    FULL_BLEED plate. (has_magenta stays a cheap pre-filter; the authoritative
+    markup test is magenta_boxes() >= 1.)
+
+  - PAGE-DECURL DEGENERATE-FIELD CAP (v16, page_dewarp.dewarp_page max_field_frac
+    =0.05): the curl field is fit from picture borders; an ill-conditioned edge set
+    can make the low-order fit go degenerate, producing a huge displacement field
+    that TEARS/duplicates the page when remapped (seen on Spectrum-3 p082: field
+    range ~1765 px on a 3456 px page duplicated the left painting). dewarp_page now
+    rejects any field whose max displacement exceeds 5% of page height (real curls
+    here are <=31 px) and no-ops instead of warping. Verified: p082 now skips the
+    bad decurl and composes cleanly as a 3-picture page; all other pages (sane
+    fields <=31 px) are unaffected.
+
+
+  - MAGENTA = BOXES ONLY; RECONSTRUCT FROM THE CLEAN ORIGINAL (v15). A magenta-
+    marked page is a MARKUP copy: it is usually heavily re-compressed (the Spectrum-3
+    p046 markup was 1.4 MB vs the 6.4 MB original) and has ink drawn over the art.
+    So a magenta page now supplies ONLY the art-box GEOMETRY; the deliverable is
+    reconstructed from the pixel-aligned CLEAN ORIGINAL with the FULL deskew/dewarp
+    applied (boxes -> compose_multi on the original, same per-plate deskew +
+    inward-crop + close_triangles the FULL_BLEED multi path uses). The markup's
+    pixels never reach the output. Two changes implement this:
+      * magenta_crop.magenta_dewarp(magenta_img, orig_img, flatfield_whiten):
+        boxes from the markup, pixels from the original. Requires the two to be
+        PIXEL-ALIGNED (draw the magenta on a COPY of the exact original scan);
+        mismatched sizes raise. (magenta_compose() — the old literal crop straight
+        off the markup, no deskew — is kept but is PREVIEW ONLY, never shipped.)
+      * reconstruct.py pairs each staged markup with its clean original by
+        NORMALISED stem (download-dedup suffixes __2_/(1) and _orig/_clean/_mag tags
+        stripped) + identical dims + the candidate having NO magenta loops. The
+        original is then consumed (not also processed as a standalone page) and the
+        output is named <normalised-stem>_reconstructed.jpg.
+    >>> IF YOU ARE HANDED A MAGENTA PAGE WITHOUT ITS CLEAN ORIGINAL: STOP AND ASK <<<
+    Do NOT dewarp/ship the markup. The run enforces this: a markup with no staged
+    original is NOT reconstructed — its boxes are written to
+    <stem>.magboxes.json and the run prints a request for the original. Stage the
+    pixel-aligned original (same scan, no magenta) and re-run.
+    A page with only INCIDENTAL magenta-ish art pixels (reddish/purple paint that
+    trips the loose has_magenta pixel test but forms NO closed loop) is NOT treated
+    as a markup — magenta_boxes() returns 0 and it falls through to normal
+    processing. Markup detection is "has >=1 closed magenta LOOP", not raw pixels.
+    Verified: Spectrum-3 p046 markup (3 loops) + its clean original -> 3 plates
+    dewarped from the original (+0.04, -0.02, +0.67 deg); the original was paired,
+    consumed and not double-processed; the clean original's own 2790 stray magenta
+    px (0 loops) did not misclassify it as a markup.
+
+  - EDGE SEPARATION PER BOX (v15, compose_multi clip_boxes=True for magenta): each
+    box is deskewed/cropped on a sub-crop PADDED 8% outward (so the deskew can see
+    the art edge). On a tight multi-plate page that pad reaches INTO the neighbour
+    plate, and the corner-fit keystone (close_triangles) then pulled the neighbour's
+    corner and STRETCHED the plate (Spectrum-3 p046: the top-right Gaetano plate's
+    pad overlapped the left Royo plate -> the whole Gaetano head came out visibly
+    widened). Fix: for MANUAL magenta boxes, before deskew_deep_crop, paint the pad
+    ring (everything in the sub OUTSIDE this box) to flat page bg, so the art-edge
+    detection / deskew / keystone see ONLY this picture's art over background and
+    can never grab a neighbour. The box's own art edge over real page bg is still
+    found and straightened normally. So the magenta guide sets the OUTER bound and
+    the art's own edges are recognised SEPARATELY inside it. Verified on p046: with
+    clipping, the Gaetano head aspect matches the original (0.913 vs 0.919; the
+    pre-fix stretch is gone) and the Bober plate's spurious +0.67 deg (neighbour
+    contamination) drops to -0.02 deg. clip_boxes defaults FALSE for the auto
+    art_pictures path -- those boxes come from the art itself and want the pad.
+    RESIDUE ERASE (same clip_boxes path): the magenta box is authoritative, so the
+    WHOLE box (+ a small margin) is erased to paper before the cleaned crop is
+    pasted, AND any COLOURED-ART bleed in a ~6%-of-short-side band just outside the
+    box is erased too -- the thin original-art sliver left stranded in the margin
+    when the magenta line was drawn a hair INSIDE the art (Spectrum-3 p046: the
+    Bober line sat ~13 px inside the plate's left edge, leaving a pink sliver in the
+    paper). The bleed test is saturation-gated (sat>50), so low-sat CAPTION TEXT and
+    plate/page numbers in the band are preserved, and the erase never crosses into
+    another picture's box (touching grids stay intact). Verified on p046: the Bober
+    left sliver and the other plate-edge residue are gone; captions 1-4, the plate
+    numbers and page 30 are all kept.
+
+
+  - PAGE_DEWARP=True : page-level curl pre-pass (page_dewarp.py) removes the binding-
+    curl BOW before detection; curvature-only, multi-edge residual-gated. (curl =
+    page field; slope = per-pic deskew.)
+  - DESLOPE_TEXT=True : TEXT_LEFT/DARK_BG panels are desloped (clean_crop never
+    rotated before), so the curl/slope split holds for every page type.
+  - Texture fill : every empty/erased region is filled with _bg_texture (a sampled,
+    mirror-tiled patch of real paper/dark grain) — NO flat average-colour fill
+    anywhere. TEXT_LEFT builds on the flat-field-whitened page (paper texture +
+    caption + page numbers kept); DARK_BG samples the dark ground's grain.
+  - stem-overwrite bug fixed; PAGE_OVERRIDES available to force a page type.
+  - MAGENTA OVERRIDE (magenta_crop.py, MAGENTA_OVERRIDE=True): submit a page with
+    art borders hand-drawn as a continuous magenta outline and those loops are used
+    as the art rectangles, overriding auto-detection. The fix-a-bad-page workflow.
+    NOTE (v15): the loops now supply BOX GEOMETRY ONLY — the page is reconstructed
+    from the pixel-aligned CLEAN ORIGINAL, not from the markup copy. See the
+    "MAGENTA = BOXES ONLY" entry above and the bottom MAGENTA-OUTLINE section.
+  - PROFILE REBUILT EVERY RUN (v3): the paper profile is rebuilt on EVERY run, as
+    an envelope over the pages currently staged in INPUT_DIR. No cached profile is
+    read back to skip the rebuild, so the profile can never inherit a previous
+    run's numbers. paper_profile.json is still written (stamped
+    {s_max, dv, n_pages, built_at}) but only as a provenance record. The
+    envelope is stable across the STAGED BATCH, not any larger fixed collection --
+    stability comes from building over MANY files at once (a few saturated plates
+    can move s_max/dv on a tiny slice), so stage the whole batch you intend to
+    process together rather than a handful per run. A run over fewer than
+    _MIN_PROFILE_PAGES (=20) prints a NOTE.
+  - RESUME (v3, RESUME=True): a page whose output already exists in OUTPUT_DIR is
+    skipped before its decode. This lets a big batch be processed across several
+    runs WITHOUT clearing INPUT_DIR -- the whole batch stays staged so the profile
+    is rebuilt over all of it every run (one stable threshold), while finished
+    pages are not re-rendered. Set RESUME=False to force a full re-render.
+  - build_profile.py is now OPTIONAL (pre-build/inspect a profile for a folder of
+    jpegs). It is no longer required before a run, because the run rebuilds anyway.
+  - EDGE-SLIVER FIX (v5, EDGE_SLIVER_FIX=True): after an art page is composed, the
+    thin triangular slivers / tone-seams of OFF-WHITE PAGE that leak into the art
+    block along its straight deskew edges (left by a small residual deskew angle or
+    a slightly tilted printed art edge) are removed. Mechanism (remove_edge_slivers
+    in deskew_crop.py): a pixel is refilled with clean paper texture only if it is
+    BOTH strict near-white page (value within ~24 of the page white point, low sat)
+    AND connected to the page border. Margins + the edge slivers (which bleed in
+    from the margin) are border-connected; interior PALE ART (misty skies, light
+    backgrounds, surrounded by art) is NOT border-connected, so it is preserved.
+    Compose always leaves a paper frame around each pasted art block, so real art
+    never touches the page border and is never removed. Applied to every
+    *_reconstructed.jpg (FULL_BLEED / multi / TEXT_LEFT / DARK_BG / magenta);
+    TEXT pages are untouched. Set EDGE_SLIVER_FIX=False to disable.
+    v10 UPGRADE: the fill now also removes the dull GREY TRANSITION sliver (a soft
+    band, value well below the page white point ~190, that the strict near-white
+    test missed) -- not just bright slivers. Mechanism: grow the border-connected
+    near-white margin inward into adjacent SOFT pixels (mildly bright, low-sat),
+    but only within a shallow CAP (2.5% of the short side) and never across SOLID
+    ART (saturated OR clearly dark). Cap + solid-art barrier keep low-saturation
+    light ART safe (cream cloth, tan plate, pale sky): its body is beyond the cap
+    or fenced by solid art, while the thin grey edge sliver beside it is absorbed.
+    Verified on 027 (blue dragon left grey sliver gone, art intact), 069 (grey
+    sliver gone, cream bedsheet intact), 026/052 (tan + grainy plates intact).
+  - RESIDUAL RE-DEWARP (v6, upgraded v11; REDEWARP=True, in deskew_crop.
+    deskew_deep_crop): the real cause of the page-vs-art "triangle" wedge is that
+    the FIRST deskew can under-rotate a plate whose printed edge is soft (a grey
+    transition band hides the true edge from the first angle estimate), leaving the
+    art tilted by ~1-3 deg -- the wedge IS the page gap beside that still-tilted
+    edge, NOT removable paper. A triangle therefore means RE-DEWARP (straighten the
+    art so it fills the rectangle), not paint-over. So: (1) deskew once (pass 1);
+    (2) measure the residual tilt FROM THE TRIANGLE -- residual_tilt() takes the
+    SOLID-art boundary (distinctly dark OR saturated; ignores page + grey band) and,
+    crucially, fits a line to ONLY the GAP rows (where the art pulls away from the
+    crop boundary). A whole-edge fit is washed out to ~0 when the opposite side is
+    CLAMPED to the crop (the v6 bug that missed 027/031/035: ~55% of the edge sat at
+    x=0 and averaged the tilt away). (3) re-deskew with a DAMPED FIXED-POINT loop:
+    a slightly bowed edge reads steeper over the gap, so trusting one measurement
+    overshoots and flips the tilt; instead add 0.5*residual per iteration and
+    re-measure, converging to ~0. Accept only if it CONVERGED (|residual|<0.35) and
+    the rotation was meaningful (>0.25 deg) -- a painting's own angled content never
+    converges and is rejected. Verified: 027 -1.29 -> 0.20 deg, 031 -1.19 -> -0.16,
+    035 -0.84 -> 0.01, 036 top edge flattened; genuinely-straight pages (052) and
+    too-noisy edges fall through untouched to the sliver fill. Runs per plate inside
+    deskew_deep_crop (so compose_multi pages get it too). Set REDEWARP=False to
+    disable. ORDER: re-dewarp (straighten geometry) runs first inside
+    deskew_deep_crop; the edge-sliver fill runs after compose and only mops up the
+    residual SOFT bands (straight edges with a grey transition, not a warp).
+    identify-triangle -> re-dewarp -> clean any soft residue.
+
+  - TRIANGLE-CLOSING FINAL DEWARP (v12, deskew_crop.close_triangles, runs as the
+    LAST step inside deskew_deep_crop, after the rotation re-dewarp): some plates
+    still show an off-white CORNER TRIANGLE because the art is a KEYSTONED quad --
+    one edge tilted relative to its opposite (e.g. a top edge that slopes while the
+    bottom stays level), which NO rotation can remove (minAreaRect reads 0 deg, the
+    bounding box is already axis-aligned, yet a corner is pulled in). So as a final
+    measure we find the art's 4 CORNERS (convex-hull extremes of the dominant solid
+    component) and perspective-warp that quad onto its bounding RECTANGLE -- the
+    off-white triangles fill with art. This is the corner/quad view of the warp:
+    look for the off-white triangle, treat it as warp, dewarp again (top, side or
+    corner, in one perspective step). GATES (keep it safe): one plate must DOMINATE
+    the crop (span>=0.55 -> a multi-plate crop is never collapsed to one plate);
+    the art must FILL its quad (>=0.86 -> skip L-shaped/garbage components); and the
+    corner pull must be a real-but-plausible 1.2%-6% of the plate (skip clean plates
+    and detection blow-ups like a 17% deviation). Verified: 032 top triangle closed
+    (collage now a clean rectangle, caption/header kept), 069/036 corner triangles
+    closed, art intact; clean pages (027 after its rotation fix, 020, 031, 060) are
+    left untouched. Runs per plate (compose_multi) so each picture is corrected
+    independently. ORDER end to end: deskew -> rotation re-dewarp -> close_triangles
+    (keystone) -> compose -> edge-sliver fill (soft residue).
+
+  - GAP-AWARE PLATE SPLIT (v13, deskew_crop.art_pictures via _merge_boxes_gapaware
+    + _should_merge): the biggest cause of a remaining 'triangle' on a multi-plate
+    page was NOT the dewarp -- it was plate DETECTION. Two separate paintings that
+    sit close together (e.g. 052 fire-angel over warrior, 070 cat-portal over egg,
+    and the 3-up pages 010/060) were bbox-MERGED into one box because their gap was
+    just under the merge gutter. The single merged box then deskews to the DOMINANT
+    painting and the second one is never isolated -> it keeps its scan tilt -> the
+    'triangle' beside its still-tilted edge. Fix: before merging two near boxes,
+    look at the strip BETWEEN them -- if it is page-coloured (art coverage < 0.22)
+    they are SEPARATE plates and stay split; only merge when the gap actually holds
+    art (one artwork split by a thin band). Once split, each plate runs through the
+    normal deskew + rotation re-dewarp + close_triangles independently and comes out
+    straight (verified: isolated 052 fire-angel deskews to 0.0 deg on its own). This
+    is why most flagged pages read 'clean' per-plate yet showed triangles in the
+    composed page: the tilted plate was never given its own deskew. Tuned so it only
+    splits genuine multi-plate pages (010/052/060/070...): single paintings, whose
+    internal light areas are not full page-gaps, are untouched.
+
+  - PAINT-OVER REMOVED (v14, EDGE_SLIVER_FIX=False in reconstruct.py): the edge-
+    sliver fill (deskew_crop.remove_edge_slivers) is no longer wired in. Rationale
+    (Gique): a properly dewarped plate fills its rectangle, so there is NO sliver to
+    remove -- a leftover sliver means the dewarp under-reached and must be fixed at
+    the dewarp (rotation re-dewarp / close_triangles / plate split), NOT hidden with
+    paper texture. Verified after removal: 027 and 069 left edges are clean, sharp,
+    straight art-to-paper transitions with no grey band; nothing reappeared. The
+    function is kept in deskew_crop.py for reference but is dead code now. If a grey
+    scanner-transition band ever shows on an otherwise-straight edge, fix the CROP
+    (tighten the inset so the crop edge lands inside solid art), do not re-enable a
+    paint step.
+  NOTE: there is NO white-text-on-black colour-bleed step in this pipeline. If a
+  dark page with white text needs that, it must be added and tested on a real page
+  first. (Do not import it from any other project's engine.)
+
+FILES (keep together)
+  reconstruct.py   main pipeline: classify -> page-decurl -> detect -> deskew/crop -> compose
+  deskew_crop.py         deskew + inward crop + paper-profile + multi-picture
+  dewarp_text.py         text-page treatment + flatfield_whiten (imported)
+  page_dewarp.py         PAGE-LEVEL curl pre-pass for art pages (imported)
+  magenta_crop.py        manual magenta-outline border override (imported)
+  build_profile.py       OPTIONAL: pre-build/inspect the stamped profile for a
+                         folder of jpegs (the run rebuilds anyway)
+  paper_profile.json     provenance record of the LAST run's profile, stamped
+                         {s_max, dv, n_pages, built_at} (rebuilt every run;
+                         not read back)
+  START_HERE.txt         this file
+  Deps: opencv-python, numpy, scipy
+
+
+WHAT IT DOES
+------------
+Each page is classified as one of:
+  FULL_BLEED   one or more art rectangles on shaded paper (the common case)
+  DARK_BG      art on a dark ground; panels composited onto a flat margin-tone canvas
+  TEXT_LEFT    art with a text column; panels composited onto the flat-field-whitened
+               page (real paper TEXTURE + caption text + page numbers kept), NOT a
+               flat fill -- so margins/gaps show paper grain and any over-crop reveals
+               the original art underneath instead of a blank patch
+  TEXT         full text page (contents / colophon / essay): curl-dewarp +
+               flat-field whiten, original pixels relocated, NO OCR
+  SKIP         not reconstructable as panels
+
+FULL_BLEED handling (the core path):
+  1. Detect art as the largest NON-PAPER component, using an off-white
+     paper profile (per-page value anchor + global saturation/value bounds; hue
+     ignored). Isolates art from caption / header / paper, even on partial-page
+     plates.
+  2. Deskew: rotate by an angle estimated ONLY from reliable border edges (noisy
+     dark-on-dark edges are discarded, so no over-rotation).
+  3. Crop: bounding box of the deskewed art plus a small uniform inward inset, so
+     the straight rectangle sits just inside the art (no paper sliver / skew
+     wedge / tilted keyline).
+  4. Compose: flat-field-whiten the page (removes vignette, keeps paper texture
+     AND all printed text -- page numbers, plate numbers, captions, signatures),
+     erase the original skewed art footprint, paste the clean deskewed art on top.
+     The erased footprint is filled with _bg_texture (a generous sampled patch of
+     paper, mirror-tiled) -- NOT a flat average colour -- so no flat fill survives.
+  5. Patch-erase: wipe a thin frame just outside the pasted art to remove orphan
+     fringe protruding past the straight edge (also filled with _bg_texture).
+     Margin text survives via a connectivity rule (small non-paper islands not
+     joined to the art mass kept). DARK_BG canvases use _bg_texture(paper=False),
+     sampling the dark ground's grain instead of a flat colour.
+
+
+MULTI-PICTURE PAGES (index / showcase pages with 2+ artworks)
+-------------------------------------------------------------
+Some FULL_BLEED-classified pages carry several separate artworks plus a caption
+column. The pipeline detects and straightens EACH artwork independently:
+
+  art_pictures(orig, bg) -> list of full-res [x0,y0,x1,y1] picture boxes (>=1).
+    A "picture" is a sizeable component whose pixels are MOSTLY strong art
+    (clearly past the paper envelope: sat > s_max+30 OR
+    value < page_whitepoint-dv-30). That strong-coverage test (keep >= 0.45)
+    separates a real artwork -- which scores high even with a light/pale
+    background -- from soft paper vignette/shadow blobs and thin page-edge
+    slivers, which score low and are rejected. Components of one split painting
+    are bbox-merged so a single artwork is never returned as several pictures.
+
+  compose_multi(orig, bg, flatfield_whiten, boxes):
+    Whiten the page once (caption column / headers / plate+page numbers kept),
+    then deskew + inward-crop each picture box independently and paste each back
+    over its own footprint. Text between/around the pictures is never inside a
+    footprint, so it survives untouched.
+
+Routing (FULL_BLEED branch):
+    pics = art_pictures(img, bg)
+    len(pics) >= 2 -> compose_multi      len(pics) == 1 -> compose_fullbleed
+  compose_fullbleed self-detects its own art region; the passed box is ignored,
+  so single-artwork output is unaffected by the multi path.
+
+
+PAGE-CURL CORRECTION (pre-pass, page_dewarp.py)
+-----------------------------------------------
+Deskew only ROTATES (handles per-picture SLOPE); it cannot remove binding-curl, the
+smooth vertical bow that leaves picture top/bottom edges arced. So curl is removed
+at the PAGE level, on the original scan, BEFORE any picture is detected or cropped
+(wired in via PAGE_DEWARP=True, applied right after classify). Then the existing
+per-picture deskew runs on an already-flat page. Clean split of labour:
+  page field  -> the smooth curl (the bow)
+  per-pic deskew -> each picture's individual tilt (the slope)
+TEXT_LEFT / DARK_BG panels are NOT rotated by clean_crop (straight cut only), so
+they get their own deslope: DESLOPE_TEXT=True wraps clean_crop with deslope_crop,
+which measures each panel's _reliable_angle (same gate as the FULL_BLEED deskew),
+rotates a padded region about the box centre when the tilt is real, then makes the
+straight cut on the upright panel. So the curl/slope split now holds for EVERY
+page type, and the page field is free to do curvature only.
+
+Why it is reliable where the earlier per-edge "flatten" was not: it never traces
+an edge column-by-column. Each picture border (from art_pictures boxes) is fit to
+a low-order curve with a RESIDUAL GATE -- exactly how _reliable_angle trusts or
+rejects a slope. A border that is not a clean line (a treeline, a sky fading into
+paper) fails the gate and is discarded, not followed. The surviving clean borders
+from several pictures, at different heights, over-constrain ONE low-order field
+[1,x,y,x^2,(y^2),xy] (y^2 only with >=3 edges). Too smooth to bow a straight edge;
+too over-constrained for a single bad border to move. Needs >=2 clean borders that
+agree, so single-picture pages auto-no-op and fall through to compose_fullbleed
+(which already handles a lone plate as one unit -- why single-image pages were
+always clean). Pure vertical remap, so caption columns only shift a few px.
+Knobs: page_dewarp.dewarp_page(min_field=4.0); _edge_samples(resid_thr=3.5).
+
+
+KNOWN-BUG FIXES BAKED IN (do not regress)
+-----------------------------------------
+  - stem is assigned ONCE at the top of the page loop. Previously it was set only
+    inside the TEXT / FULL_BLEED branches, so a TEXT_LEFT or DARK_BG page inherited
+    the PREVIOUS page's stem and silently overwrote that page's output (no error).
+    Any batch run with the old script may have lost a plate wherever a TEXT_LEFT
+    page followed another page -- worth spot-checking old outputs.
+  - PAGE_OVERRIDES can force a page type; e.g. a showcase page whose only frameless
+    cutout fools the classifier into SKIP can be pinned to FULL_BLEED.
+
+
+MAGENTA-OUTLINE OVERRIDE (magenta_crop.py)
+------------------------------------------
+Fix-a-bad-page workflow: when auto-detection mis-finds a border, take the rendered
+page, draw the correct art borders on it as a CONTINUOUS outline in one specific
+MAGENTA (the gate is HSV hue ~163, high sat -- a bright pink-magenta; keep it that
+exact colour and keep each loop closed), and re-submit.
+
+  >>> The magenta is drawn on a COPY. Draw it on a copy of the EXACT original scan
+      so the markup and the original are PIXEL-ALIGNED, and KEEP the original --
+      the markup gives the boxes, the original gives the pixels. <<<
+
+The pipeline detects the magenta loops (has_magenta + magenta_boxes), takes each
+closed loop as one art rectangle (the loop's INNER edge), then reconstructs from
+the CLEAN ORIGINAL: magenta_dewarp() runs the full per-plate deskew + inward-crop
+on the original within those boxes and composites onto the whitened original page,
+KEEPING caption text + page numbers outside the loops. The markup's (re-compressed)
+pixels are never used; the magenta line never has to be scrubbed from the output
+because the output is built from the clean original.
+  - WHY: a magenta page is a markup copy, normally lower-quality and with ink over
+    the art. Dewarping it would ship a degraded, un-straightened plate. Boxes-only
+    + reconstruct-from-original gives a full-quality, properly dewarped result.
+  - NO ORIGINAL? STOP and ask for it. The batch run will NOT reconstruct a markup
+    that has no staged original — it saves the boxes to <stem>.magboxes.json and
+    asks for the original. Never hand-wave this by dewarping the markup.
+  - Pairing in a batch: stage the markup AND its clean original together. They are
+    paired by normalised stem (download-dedup suffixes __2_/(1) and _orig/_clean/
+    _mag tags stripped) + identical dimensions + the candidate having no magenta
+    loops. The original is consumed (not processed as a standalone page); the output
+    is <normalised-stem>_reconstructed.jpg.
+  - Works for single-image, multi-image and text-column pages (loops may touch /
+    share edges, as in a 2x2 grid). Small breaks in the line are bridged
+    (directional close); cleaner closed lines = cleaner boxes. Because the original
+    is re-deskewed/inward-cropped per box, a slightly loose loop is fine — the crop
+    snaps to the real printed art edge — but drawing close to the art is still best.
+  - Standalone (proper, ships):
+      python3 magenta_crop.py --original CLEAN_ORIGINAL.jpg page_with_magenta.jpg
+      # -> CLEAN_ORIGINAL_reconstructed.jpg  (boxes from markup, pixels from original)
+  - Standalone (PREVIEW ONLY, do not ship — literal crop off the markup, no dewarp):
+      python3 magenta_crop.py page_with_magenta.jpg   # -> *_magcrop.jpg
+
+
+RUN
+---
+  1. Stage the WHOLE batch of input JPEGs into INPUT_DIR (default
+     /home/claude/work/input) -- all the pages you want one shared profile over
+     (e.g. the ~80 pages of a handover). Outputs (*_reconstructed.jpg, *_text.jpg)
+     go to OUTPUT_DIR (default /home/claude/work/output). Edit both paths at the
+     top of reconstruct.py if needed. Flags PAGE_DEWARP / DESLOPE_TEXT /
+     MAGENTA_OVERRIDE / RESUME are at the top of the same file (all default True).
+  2. python3 reconstruct.py
+     The profile is rebuilt automatically at the start of EVERY run, as an envelope
+     over whatever is staged in INPUT_DIR -- no separate build step, no cache. So
+     the threshold is always consistent across the staged set, and never inherited
+     from a previous run. (build_profile.py is optional, only if you want to inspect
+     the numbers for a folder first.)
+  3. COMPUTE WINDOWS: each plate is ~13-15 s (flat-field inpaint + 2x warpAffine +
+     footprint mask), so ~80 pages can exceed one window. DO NOT clear INPUT_DIR to
+     chunk -- that would shrink the profile to the chunk. Instead keep the whole
+     batch staged and just RUN AGAIN: RESUME skips pages already rendered, so each
+     run rebuilds the profile over the full set (identical numbers) and renders only
+     what is left. Repeat until every page is done.
+  4. Deliverable: rendered *_reconstructed.jpg in OUTPUT_DIR. Verify visually before
+     shipping.
+
+
+PAPER PROFILE (off-white range)
+-------------------------------
+build_paper_profile(paths) takes an ENVELOPE across pages of each page's paper
+(margin-ring sample; outer rim dropped), covering grey/beige/blue/yellow stock,
+plus slack pushed close to the over-identification edge:
+    s_max = p95(per-page paper saturation-p98) + 44
+    dv    = p95(per-page paper value-drop)      + 30
+Hue is ignored (capping saturation already accepts any tint). Per-page value
+anchoring (white point from each page's own margins) handles brighter/darker
+pages individually.
+
+paper_profile.json is rebuilt over the staged set on every run (see v3 note above),
+so it is always valid for whatever is currently in INPUT_DIR -- there is no stale
+cache to worry about. Stage the WHOLE batch you want one threshold over so the
+envelope is built across all of it at once. If a page has a very pale-edged
+painting that starts clipping (art region eaten into), lower the slack until that
+plate's art stops clipping.
+
+
+TUNING KNOBS
+------------
+  deskew_deep_crop(margin_frac=0.015)   inward bite depth; raise to crop more
+                                        aggressively into the art, lower to keep
+                                        more (incl. printed keylines/borders).
+  art_pictures(min_area=0.035, min_dim=0.11, min_strong=0.45)
+                                        min_strong: lower to admit very
+                                        pale-backgrounded artworks; raise if a
+                                        tinted-paper blob is mistaken for art.
+  PAGE_OVERRIDES (top of reconstruct.py)
+                                        force a page type for a filename the
+                                        classifier gets wrong.
+
+Sanity-check, before shipping a new batch, that art_pictures returns the
+expected picture count on any index/showcase pages (a single painting should
+return 1; a true multi-artwork page should return its real count).
