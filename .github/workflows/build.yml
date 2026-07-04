@@ -1,33 +1,44 @@
-name: Build Windows EXE
+name: build-executables
 
-# Runs when you push, and also lets you trigger it by hand from the Actions tab
 on:
-  workflow_dispatch:
   push:
-    branches: [ main ]
+    tags:
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: windows-latest          # a Windows machine in the cloud
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
-      - name: Get the files
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'      # 3.12 has all the wheels (not 3.14)
-
-      - name: Install build tool + libraries
+          python-version: '3.11'
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller opencv-python scipy numpy pillow
-
-      - name: Build the app
-        run: pyinstaller --noconfirm --console --onedir --name SpectrumReconstructor --collect-all cv2 --collect-all scipy reconstruct.py
-
-      - name: Package the finished app for download
+          pip install -r requirements.txt pyinstaller
+      - name: Build single-file executable
+        run: pyinstaller --onefile --name dewarp --collect-submodules scipy --hidden-import magenta_text dewarp_cli.py
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SpectrumReconstructor-windows
-          path: dist/SpectrumReconstructor
+          name: dewarp-${{ matrix.os }}
+          path: dist/*
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Attach binaries to the Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
