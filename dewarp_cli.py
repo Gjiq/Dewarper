@@ -1,60 +1,102 @@
 #!/usr/bin/env python3
-"""Command-line front-end for the Dewarp Pipeline.
+"""Command-line / drag-and-drop front-end for the Dewarp Pipeline.
 
-Wraps ``reconstruct.py`` so the tool takes normal command-line arguments
-(``--input`` / ``--output``) instead of ``DEWARP_INPUT`` / ``DEWARP_OUTPUT``
-environment variables. This is the entry point the compiled executable uses.
+Three ways to launch the compiled `dewarp` executable:
 
-Examples
---------
-    dewarp --input ./pages --output ./out
-    dewarp -i ./pages -o ./out --cached-profile
+  * Drag a folder of page scans onto the app  -> it processes that folder and
+    writes results to a sibling folder "<folder>_reconstructed".
+  * Double-click the app                       -> it asks you for the folder.
+  * From a terminal                            -> dewarp -i ./pages -o ./out
+
+Magenta-marked pages (<page>_mag.jpg) supply box geometry and are reconstructed
+from the clean original.
 """
 import argparse
 import os
 import sys
 
 
+def _pause(friendly: bool) -> None:
+    """Keep a double-clicked console window open so messages stay readable."""
+    if friendly:
+        try:
+            input("\nPress Enter to close this window...")
+        except EOFError:
+            pass
+
+
 def main() -> None:
+    argv = sys.argv[1:]
+
     p = argparse.ArgumentParser(
         prog="dewarp",
-        description="Reconstruct scanned art-annual pages: deskew, deep-crop, "
-                    "flat-field whiten (or keep-black for dark pages) and retain "
-                    "page text. Magenta-marked pages (<page>_mag.jpg) supply box "
-                    "geometry and are reconstructed from the clean original.",
+        description="Reconstruct scanned art-annual pages (deskew, crop, whiten / "
+                    "keep-black, retain text).",
     )
-    p.add_argument("-i", "--input", required=True, metavar="DIR",
-                   help="folder of page scans (*.jpg), including any *_mag.jpg markups")
-    p.add_argument("-o", "--output", required=True, metavar="DIR",
-                   help="folder to write <page>_reconstructed.jpg / _text.jpg into")
+    p.add_argument("folder", nargs="?",
+                   help="folder of page scans (you can drag it onto the app)")
+    p.add_argument("-i", "--input", dest="input_flag", metavar="DIR",
+                   help="same as the folder argument")
+    p.add_argument("-o", "--output", dest="output_flag", metavar="DIR",
+                   help="where to write results (default: <folder>_reconstructed)")
     p.add_argument("--cached-profile", action="store_true",
-                   help="reuse a cached paper profile if one is present "
-                        "(sets DEWARP_CACHED_PROFILE=1)")
+                   help="reuse a cached paper profile if present")
     args = p.parse_args()
 
-    in_dir = os.path.abspath(args.input)
-    out_dir = os.path.abspath(args.output)
-    if not os.path.isdir(in_dir):
-        p.error(f"input folder does not exist: {in_dir}")
-    os.makedirs(out_dir, exist_ok=True)
+    inp = args.input_flag or args.folder
+    out = args.output_flag
 
-    # reconstruct.py reads these at import time and runs the batch driver on
-    # import, so they must be set *before* it is imported below.
-    os.environ["DEWARP_INPUT"] = in_dir
-    os.environ["DEWARP_OUTPUT"] = out_dir
+    # "friendly" = launched by double-click or by dragging a folder onto the app,
+    # i.e. not a normal terminal invocation with -i/-o. In that mode we prompt,
+    # auto-name the output, and pause at the end.
+    friendly = (not argv) or (args.folder is not None and args.input_flag is None
+                              and args.output_flag is None)
+
+    if not inp:
+        friendly = True
+        print("Dewarp Pipeline")
+        print("---------------")
+        inp = input("Paste the folder that holds your page scans, then press Enter:\n> ")
+        inp = inp.strip().strip('"').strip("'")
+
+    if not inp:
+        print("No folder given -- nothing to do.")
+        return _pause(friendly)
+
+    inp = os.path.abspath(os.path.expanduser(inp))
+    if not os.path.isdir(inp):
+        print(f"That is not a folder:\n  {inp}")
+        return _pause(friendly)
+
+    if not out:
+        out = inp.rstrip("/\\") + "_reconstructed"
+    out = os.path.abspath(os.path.expanduser(out))
+    os.makedirs(out, exist_ok=True)
+
+    os.environ["DEWARP_INPUT"] = inp
+    os.environ["DEWARP_OUTPUT"] = out
     if args.cached_profile:
         os.environ["DEWARP_CACHED_PROFILE"] = "1"
-    os.environ.pop("DEWARP_IMPORT", None)  # ensure the batch actually runs
+    os.environ.pop("DEWARP_IMPORT", None)
 
-    # Allow running both as a plain script and as a frozen (PyInstaller) binary.
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)
 
-    print(f"input : {in_dir}")
-    print(f"output: {out_dir}\n")
+    print(f"\ninput : {inp}")
+    print(f"output: {out}\n")
 
-    import reconstruct  # noqa: F401  (importing runs the full reconstruction)
+    try:
+        import reconstruct  # noqa: F401  (importing runs the full reconstruction)
+    except Exception as exc:  # keep the window open on failure
+        import traceback
+        traceback.print_exc()
+        print(f"\nERROR: {exc}")
+        return _pause(friendly)
+
+    print("\nFinished. Your reconstructed pages are in:")
+    print(f"  {out}")
+    _pause(friendly)
 
 
 if __name__ == "__main__":
