@@ -58,6 +58,12 @@ CENTER_MULTI = False
 # NOT yet verified on a real light-bg page in-session -- set False to restore exact
 # v24 behaviour (short furniture kept at its scan skew in the whitened page).
 DESKEW_SHORT_TEXT = True
+# DEWARP_TEXT_CURL (v60): on art pages the body TEXT was previously ignored. This
+# pass detects every text area of >= 1 line, separates side-by-side columns, and
+# CURL-dewarps each independently (flatten baselines -> corrects curl + tilt).
+# Catches multi-line columns AND bold 1-2 line headings/captions. Clean text (warp
+# < min_disp) is left untouched, so it never needlessly re-samples a straight page.
+DEWARP_TEXT_CURL = True
 SAFE_TEXT = True   # v30: do NOT wipe/ink-restamp page text (caused blobs/speckle/
 #                   art-text superimposition). Keep original scanned text on the
 #                   whitened page; only the ART is straightened. Toggle off to revert.
@@ -898,6 +904,18 @@ for fname in files:
         # (full deskew/dewarp on clean pixels), never the markup copy.
         orig_name = _orig_for[fname]
         orig_img = cv2.imread(os.path.join(INPUT_DIR, orig_name))
+        # v58: FULL-PAGE ART FRAME. A single magenta loop hugging the page edges
+        # marks the art/background boundary of a full-bleed painting whose edge
+        # blends into a dark margin (auto edge-detection can't separate them). Trust
+        # the frame as the art quad and PERSPECTIVE-rectify it to an upright
+        # rectangle, dropping the background (margins/header/page number) outside it.
+        if magenta_crop.is_full_page_frame(img):
+            out = magenta_crop.magenta_frame_blackcover(orig_img, img)
+            cv2.imwrite(os.path.join(OUTPUT_DIR, f'{out_stem}_reconstructed.jpg'),
+                        out, [cv2.IMWRITE_JPEG_QUALITY, 93])
+            print(f'{fname}: MAGENTA full-page frame + original {orig_name} '
+                  f'-> rectified + black warp-cover -> {out.shape[1]}x{out.shape[0]}')
+            continue
         # v26: respect ground polarity. magenta_dewarp ALWAYS whitens (paper=True),
         # which is wrong for art-on-black. A DARK_BG original keeps its black ground:
         # its magenta boxes drive the dark keep-black chain (dark_art) instead.
@@ -975,7 +993,12 @@ for fname in files:
     print(f'{fname}: {page_type}', end='')
 
     if page_type == 'SKIP':
-        print(' — skipped')
+        # a SKIP page (usually a vivid full-bleed misread as blank) is written back with
+        # a _skipped suffix so the batch is complete and these are flagged for review.
+        stem = fname.replace('.jpg', '')
+        cv2.imwrite(os.path.join(OUTPUT_DIR, f'{stem}_skipped.jpg'),
+                    img, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        print(' — skipped (written back as _skipped)')
         continue
 
     # Page-level curl pre-pass (multi-picture pages only; auto-no-op otherwise).
@@ -985,8 +1008,18 @@ for fname in files:
             print(f" [page-decurl {_pd['edges_ok']}edges {_pd['field_range']}]", end='')
 
     if page_type == 'TEXT':
-        # No panels: curl dewarp + flat-field whiten, original pixels relocated.
-        out = process_text_page(img)
+        # v61: whiten ONLY -- the old global curl field (process_text_page) fit one
+        # field to the whole page and rippled any art/photo on it (wavy plate edges on
+        # art-heavy pages misread as TEXT). The per-column pass below straightens each
+        # text block on its own and never touches a plate.
+        out = flatfield_whiten(img)
+        # v60: per-column / per-heading curl refine. process_text_page fits ONE global
+        # field; this separates side-by-side columns and flattens each independently
+        # (multi-column Year-in-Review / Requiem / index pages), plus 1-2 line headings.
+        if DEWARP_TEXT_CURL:
+            out, _ntc = text_blocks.dewarp_text_areas(out, [], dark_text=True, min_lines=1)
+            if _ntc:
+                print(f'    text-curl-dewarp: {_ntc} area(s)')
         stem = fname.replace('.jpg', '')
         outpath = os.path.join(OUTPUT_DIR, f'{stem}_text.jpg')
         cv2.imwrite(outpath, out, [cv2.IMWRITE_JPEG_QUALITY, 95])
@@ -1007,6 +1040,11 @@ for fname in files:
         # original skewed art rim is erased to paper so no ghost shows.
         # How many distinct artworks on the page? Index / showcase pages carry
         # 2+ separate pictures plus a caption column; ordinary plates carry one.
+        _kd = magenta_crop.keyline_deskew(img)      # v62: keyline deskew (light-bg frames too)
+        if _kd is not None:
+            _st = fname.replace('.jpg','')
+            cv2.imwrite(os.path.join(OUTPUT_DIR, f'{_st}_reconstructed.jpg'), _kd, [cv2.IMWRITE_JPEG_QUALITY, 92])
+            print(' -> FULL_BLEED keyline deskew'); continue
         pics = art_pictures(img, bg)
         stem = fname.replace('.jpg', '')
         if len(pics) >= 2:
@@ -1050,6 +1088,18 @@ for fname in files:
                 min_lines=1, max_lines=2)
             if sa:
                 print('    short-text-deskew ' + ', '.join(f'{t:+.2f}' for t in sa) + ' deg')
+        # v60: CURL-dewarp the page text (body columns AND 1-2 line headings/captions),
+        # each column/heading corrected by its own baseline field. Runs last, on the
+        # finished page; art rectangles are no-go zones.
+        if DEWARP_TEXT_CURL:
+            # No art-box exclusion here: art_pictures can over-reach into the text
+            # column and blank the pass (the "text ignored on art pages" bug). Instead
+            # rely on find_blocks' text-regularity test + the sat_max colour gate to
+            # keep plates out -- real plates are colourful / non-text, so they're never
+            # detected as paragraphs; pale regular text is always caught.
+            out, _ntc = text_blocks.dewarp_text_areas(out, [], dark_text=True, min_lines=1)
+            if _ntc:
+                print(f'    text-curl-dewarp: {_ntc} area(s)')
         cv2.imwrite(os.path.join(OUTPUT_DIR, f'{stem}_reconstructed.jpg'),
                     out, [cv2.IMWRITE_JPEG_QUALITY, 92])
         continue
@@ -1070,6 +1120,14 @@ for fname in files:
         # black page (header + caption stay; only the art footprint is repainted with
         # grain sampled from the page's own dark ground). No paper centering/erase.
         stem = fname.replace('.jpg', '')
+        # v62 KEYLINE DESKEW FIRST: if the art has its own printed white/black rectangle
+        # border, deskew to it (4-step: margin-ring keyline -> straight-line edges ->
+        # corners -> perspective). Validated (all 4 edges on the line) or returns None.
+        _kd = magenta_crop.keyline_deskew(img)
+        if _kd is not None:
+            cv2.imwrite(os.path.join(OUTPUT_DIR, f'{stem}_reconstructed.jpg'), _kd, [cv2.IMWRITE_JPEG_QUALITY, 92])
+            print(' -> DARK_BG keyline deskew')
+            continue
         inv = 255 - img
         tmp_inv = os.path.join('/tmp', f'_inv_{os.getpid()}.jpg')
         cv2.imwrite(tmp_inv, inv)
@@ -1087,6 +1145,11 @@ for fname in files:
         px = int(round(pcx - cw/2)); py = int(round(pcy - ch/2))
         px = max(0, min(px, W - cw)); py = max(0, min(py, H - ch))
         base[py:py+ch, px:px+cw] = crop
+        # v62 DO-NO-HARM: any erased-footprint pixel the straightened crop does NOT cover
+        # is restored to the ORIGINAL scan -- never left as synthesized dark grain. Kills
+        # the floating black border on full-bleed / edge-reaching dark art. (VALIDATED.)
+        covered = np.zeros((H, W), bool); covered[py:py+ch, px:px+cw] = True
+        _exp = fp & (~covered); base[_exp] = img[_exp]
         print(f' -> light dewarp via inversion, deskew {theta:+.2f} deg')
         cv2.imwrite(os.path.join(OUTPUT_DIR, f'{stem}_reconstructed.jpg'),
                     base, [cv2.IMWRITE_JPEG_QUALITY, 92])

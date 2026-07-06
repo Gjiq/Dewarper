@@ -76,10 +76,17 @@ def build_paper_profile(paths, scale=0.34):
         vdrop.append(wp - np.percentile(paper[:, 2], 3))    # this page's paper value spread
     if not s98:                                             # batch has no clean-margin page
         return {'s_max': 60, 'dv': 45, 'n_paper': 0}
-    # 95th percentile across the CLEAN-MARGIN pages + moderate slack (the slack can be
-    # smaller now that the sample is real paper, not art-contaminated).
-    s_max = int(round(np.percentile(s98, 95))) + 30
-    dv    = int(round(np.percentile(vdrop, 95))) + 26
+    # v62.3 ROBUST ENVELOPE. The old p95(+30 flat) let a big, varied batch drift the
+    # saturation ceiling loose (100 pages -> s_max 101 vs 83 on a clean set), because a
+    # handful of faintly-tinted/contaminated margins push the 95th percentile up and the
+    # flat slack stacks on top -- loosening the art/paper test for EVERY page and causing
+    # over-segmentation / mis-crops. Use an OUTLIER-RESISTANT centre (upper-quartile) plus
+    # proportional slack, and CAP the result so a large batch can never sit looser than a
+    # clean small set would. Batch size no longer degrades the thresholds.
+    s_hi = float(np.percentile(s98, 75))                    # robust upper-quartile, not p95
+    s_max = int(round(min(s_hi + 22, 88)))                  # capped: big batch can't drift loose
+    d_hi = float(np.percentile(vdrop, 75))
+    dv    = int(round(min(d_hi + 22, 78)))
     return {'s_max': s_max, 'dv': dv, 'n_paper': n_paper}
 
 

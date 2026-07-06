@@ -1,4 +1,4 @@
-DEWARP PIPELINE — v57
+DEWARP PIPELINE — v63
 ====================
 (Scanned art-plate reconstruction.)
 Deskews, crops and whitens scanned art-annual pages so each printed artwork is
@@ -11,7 +11,7 @@ folder into a session to run.
   This build is v49, so the next handover is v50, then v51, and so on — never reuse a
   number, never drop the name. After bumping it, update the "DEWARP PIPELINE — v<N>"
   line at the top of this file to match, so the version always travels with the code.
-  This build is v57; the next handover is v58.
+  This build is v63; the next handover is v64.
 
 >>> READ FIRST — THIS IS AN IMAGE PIPELINE <<<
   The deliverable is RENDERED JPEG FILES, never text. When the user posts page
@@ -34,6 +34,122 @@ folder into a session to run.
   Deps already expected: opencv-python (cv2), numpy, scipy.
 
 IMPROVEMENTS BAKED IN (this build — keep all of them)
+  - NEW v63 — ROBUST PAPER PROFILE (the big batch fix). build_paper_profile used p95(+30
+    flat slack) of per-page paper saturation, which let a large/varied batch (100 pages)
+    drift the s_max ceiling loose (101 vs 83 clean) -> loosened the art/paper test for
+    EVERY page -> over-segmentation ("art pasted on itself"), mis-crops, bowed/mangled
+    output on many pages at once. Now an OUTLIER-RESISTANT upper-quartile + proportional
+    slack, CAPPED (s_max<=88, dv<=78) so batch size can't drift the envelope. Head-to-head
+    proved the v59->v62 CODE was identical output; the profile was the whole regression.
+  - NEW v63 — KEYLINE DETECTION HARDENED. keyline_deskew now (a) collects ALL bright thin
+    runs and RANSAC-fits the ONE full-length line per edge (header/banner/gloss can't
+    hijack it), (b) rejects candidate edges steeper than a frame can be (slope cap), and
+    (c) when 3 edges are strong bright-spike keylines and one is faint/broken (e.g. a top
+    rule under a header), INFERS the 4th from the rectangle instead of rejecting the page.
+    Catches p50-type frames, not just clean p48.
+  - v62 carried forward: auto keyline deskew (skew+bow, separable curve warp) on DARK_BG
+    and FULL_BLEED; 5%% stretch-cover of the residual warped border (also replaces the
+    black band on the magenta full-page-frame path); text-protected stretch; validated
+    dark-band fix; SKIP -> _skipped writeback.
+  - NEW v62 — AUTO KEYLINE DESKEW (no magenta needed). magenta_crop.keyline_deskew:
+    detects the artwork's own printed WHITE or BLACK rectangular keyline (even warped) in
+    the outer margin ring only (so bright interior art can't hijack it), fits each edge as
+    the ONE full-length straight bright/dark line via collinear RANSAC (ignores header text
+    / art gloss), left/right as straight lines + top/bottom as deg-3 CURVES, then a
+    separable transfinite remap straightens SKEW *and* edge BOW to a rectangle. Accepted
+    ONLY when all four edges validate on the keyline tone; else returns None and the page
+    goes through normal processing (nothing emitted, no magenta). Wired ahead of the
+    brightness edge detection on BOTH the DARK_BG and FULL_BLEED paths. VALIDATED on p48
+    (auto-detected white keyline, pixel-matched a hand magenta trace).
+  - NEW v62 — STRETCH-COVER for the residual warped border. After the keyline dewarp the
+    straightened art is stretched ~5%% outward past the keyline so its edge covers the old
+    warped border underneath (new art = top layer). The same stretch-cover replaces the
+    old pure-black band on the MAGENTA full-page-frame path (magenta_frame_blackcover):
+    per-side width = that edge's warp slant, filled with perspective-straightened content
+    instead of black. Rectify step UNCHANGED.
+  - NEW v62 — TEXT-PROTECTED STRETCH. _protect_text_in_stretch: in the stretched RING,
+    any text (caption/header) keeps its ORIGINAL pixels (+ small margin) so the stretch
+    never distorts text; the core dewarped art is never touched. Applied at every stretch
+    site (keyline + magenta cover).
+  - NEW v61 — TEXT DE-WARP made SAFE + extended to TEXT pages.
+    dewarp_text.dewarp_text_area rebuilt as a conservative, SELF-VERIFIED pass:
+      * FIELD only when >=4 baselines each span >=55%% of the block width; the field
+        flattens each baseline to its median, is CLAMPED to +/-1 line-height, smoothed,
+        and ANCHORED to 0 on the crop top/bottom edges so it can never ripple art just
+        above/below the text (fixes the wavy plate edge on p021/p303 etc.).
+      * else SINGLE-ANGLE deskew (whole block rotated by one angle -> lines stay
+        straight; a line can never be bent into a V by how the block was split).
+      * SELF-VERIFY: the candidate is re-tracked and kept ONLY if it flattens the
+        baselines by >=10%% (_flatness). A wrong sign, a mis-track, or a sparse/ambiguous
+        block can no longer make text worse -- it is left exactly as scanned. This
+        killed the p005 over-warp (1-line blocks) and the p014 sepia-caption mangling.
+    reconstruct.py TEXT branch now WHITENS ONLY (flatfield_whiten) instead of the old
+    global process_text_page field, which was rippling any art/photo on a page misread
+    as TEXT; the per-column pass straightens each text block and never touches a plate.
+    The curl pass runs on FULL_BLEED (art pages) AND TEXT pages. VALIDATED on Spectrum
+    24 p005/014/015/016/020/021/022/023/025/303: over-warps gone, art edges clean,
+    p016 caption genuinely de-bowed 11.0->3.2 flatness, ambiguous blocks left as-is.
+  - NEW v60 — AUTOMATIC TEXT DE-WARP on art pages (per column, per heading).
+    dewarp_text.dewarp_text_area (core) + text_blocks.dewarp_text_areas (orchestrator),
+    run as the last text pass on FULL_BLEED pages via DEWARP_TEXT_CURL. Previously the
+    body TEXT on art pages was ignored (only 1-2 line SHORT text got a rotation deskew,
+    capped at 2 deg). Now every text area of >= 1 line is detected and CURL-dewarped:
+      * COLUMNS are separated automatically (find_blocks clusters lines by x-overlap,
+        so side-by-side columns never merge) and each gets its OWN baseline field --
+        a column that curls differently from its neighbour is corrected independently
+        (e.g. Spectrum 24 p012: left col field 15px, right col 24px).
+      * min_lines=1 also catches BOLD 1-2 LINE HEADINGS/captions (e.g. 'ALESSANDRA
+        PISANO', 'MARK NEWMAN'); a single heading line is flattened along its length
+        (tilt + bow), not just rotated.
+      * The field flattens every tracked baseline to its median y (corrects curl AND
+        tilt in one remap); unlike estimate_field it does NOT zero-anchor the crop
+        borders, so a tight column/heading crop is actually corrected.
+      * GUARDS: a block is left as-is if colourful (sat_max 70 -> a plate) or its warp
+        is < min_disp (3px) -> clean text is never needlessly re-sampled. NO art-box
+        exclusion is used (art_pictures can over-reach into a text column and blank the
+        pass -- the old 'text ignored' bug); plates are kept out by the colour + text-
+        regularity gates instead.
+    VALIDATED -- Spectrum 24 p004/p008/p012: text-curl fired on all three (4/4/2 areas),
+    every corrected area pale text (sat <= 22, no plate touched); synthetic 18px curl on
+    a real column pulled 23.5px -> 11px curvature.
+  - NEW v59 — FRAME path now RESEATS + BLACK-COVERS (supersedes v58 isolate).
+    magenta_crop.magenta_frame_blackcover, wired in reconstruct.py's full-page-frame
+    branch. For a magenta full-page art frame it perspective-rectifies the art to a
+    straight NATIVE-size rectangle, seats it BACK into the page (background/header/
+    page number kept -- NOT isolated), then covers the residual warped edge with a
+    THIN PURE-BLACK band. Band width per side = that quad edge's own slant (how far
+    the warp bows on that side) + `safety` px outside, with a `seam` px overlap into
+    the art to seal the join. So the cover SCALES with the warp automatically: a
+    near-straight edge gets a few px (p028 right edge = 12px), a slanted one more
+    (p028 top/bottom/left = 35-39px). No blanket fraction, no page-specific pixels.
+    Defaults seam=5, safety=4. v58's magenta_frame_dewarp (isolate-the-art) is kept
+    in the module but is no longer the routed behaviour.
+    VALIDATED -- Spectrum 24 p028: routed as frame, output full page 2566x3496, native
+    art 2398x3290 seated, black band L35/R12/T39/B36 px covering the warp, page kept
+    full-size. NOTE the top band reaches ~39px so it grazes the 'ADVERTISING GOLD
+    AWARD' header; if page furniture must be kept, cap the band at the magenta stroke
+    outer edge (draw the frame to exclude furniture) -- a markup choice, still generic.
+  - NEW v58 — FULL-PAGE ART FRAME (magenta as art/background separator).
+    magenta_crop.is_full_page_frame / magenta_frame_corners / magenta_frame_dewarp,
+    routed in reconstruct.py right after the clean original is loaded (before the
+    dark/box paths). For a full-bleed painting whose art edge blends into a dark page
+    margin -- so the art/background boundary CANNOT be found automatically (measured
+    edge contrast ~20 L on Spectrum 24 p028) -- the markup draws a single magenta
+    frame hugging the page edges. That frame IS the art boundary: the INNER edge of
+    the magenta ring is taken as the art quad and PERSPECTIVE-rectified (4-corner
+    getPerspectiveTransform) to an upright rectangle, dropping everything outside
+    (margins, header, page number). This corrects true keystone that the box path
+    (axis-aligned crop + rotation) cannot: p028's top edge was -0.84 deg and bottom
+    +0.78 deg (non-parallel) and came out straight, corner-mapping residual 0.0 px.
+    ROUTING GUARD is_full_page_frame: fires ONLY for a single magenta loop covering
+    >55%% of the page with all four edge margins <6%%. Verified it does NOT misroute
+    an inset dark-page plate (p112-like, 13%% margin -> False) or a half-page spread
+    plate (p050-like -> False); those keep their existing paths.
+    VALIDATED -- Spectrum 24 p028 (dragon/canyon full-bleed): routed as frame (art
+    88%% of page), output 2398x3357, all four corners land on painting (no corner on
+    background/magenta), zero black warp-wedges (0.014%%), colour 89%%. NOTE the header
+    ('ADVERTISING GOLD AWARD') and page number sit OUTSIDE the frame and are dropped
+    by design (art isolated); re-include them only if a page needs page furniture kept.
   - NEW v57 — SPREAD PAGES PLACED BACK IN LAYOUT (spread_align.reconstruct_layout).
     Extends v56 so a two-page spread can be delivered as FULL PAGES, not just the two
     loose halves. For a spread pair it: (1) corrects the CLOSED top-art boxes via

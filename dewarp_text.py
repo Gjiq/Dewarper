@@ -196,3 +196,140 @@ if __name__ == '__main__':
         cv2.imwrite(f'{stem}_text.jpg', process_text_page(im),
                     [cv2.IMWRITE_JPEG_QUALITY, 95])
         print(path, 'done')
+
+
+def _track_baselines(crop):
+    """Track text baselines across N vertical bands. Returns (xs, tracks, N)."""
+    H, W = crop.shape[:2]
+    N = int(min(44, max(12, W // 28)))
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    dark = 255 - _flatfield_gray(gray)
+    bw = W / N
+    xs, band_peaks = [], []
+    for i in range(N):
+        x0, x1 = int(i * bw), int((i + 1) * bw)
+        xs.append((x0 + x1) / 2.0)
+        prof = gaussian_filter(dark[:, x0:x1].mean(axis=1).astype(np.float32), 3)
+        pk, _ = find_peaks(prof, distance=18, prominence=5,
+                           height=prof.mean() + 0.3 * prof.std())
+        band_peaks.append(pk.astype(np.float32))
+    tol = 18 * 0.8
+    tracks, active = [], []
+    for i, pk in enumerate(band_peaks):
+        used = [False] * len(pk); new_active = []
+        for tr, last in active:
+            if len(pk) == 0:
+                continue
+            d = np.abs(pk - last); j = int(np.argmin(d))
+            if not used[j] and d[j] <= tol:
+                tr.append((i, float(pk[j]))); used[j] = True
+                new_active.append((tr, float(pk[j])))
+        for j, p in enumerate(pk):
+            if not used[j]:
+                tr = [(i, float(p))]; tracks.append(tr); new_active.append((tr, float(p)))
+        active = new_active
+    return xs, tracks, N
+
+
+def _baseline_tilt_deg(tracks, xs):
+    """Median tilt (deg) of the tracked baselines -- for the single-angle deskew."""
+    slopes = []
+    for tr in tracks:
+        if len(tr) < 3:
+            continue
+        X = np.array([xs[bi] for bi, _ in tr], np.float32)
+        Y = np.array([y for _, y in tr], np.float32)
+        if X.max() - X.min() < 1:
+            continue
+        slopes.append(np.polyfit(X, Y, 1)[0])
+    if not slopes:
+        return 0.0
+    return float(np.degrees(np.arctan(np.median(slopes))))
+
+
+def _flatness(tracks, N):
+    """Mean vertical spread of tracked baselines about their own median (px). 0 = every
+    line dead horizontal. Captures BOTH tilt and curl (a tilted line has high spread
+    about its median too), so smaller = flatter. Inclusive threshold so a 1-2 line
+    heading's tilt is still measurable (lets the deskew fallback be self-verified)."""
+    need = max(3, N // 3)
+    devs = [float(np.std([y for _, y in tr])) for tr in tracks if len(tr) >= need]
+    return float(np.mean(devs)) if devs else 0.0
+
+
+def dewarp_text_area(crop, smooth=(60, 30), min_field_lines=4, span_frac=0.55,
+                     max_disp_lh=1.0, min_deskew=0.3, max_deskew=3.0):
+    """Straighten one text area with a deliberately conservative policy:
+
+      * A curl FIELD is built ONLY when >= min_field_lines baselines are each tracked
+        across >= span_frac of the block width (reliable, full-span lines). The field
+        flattens each baseline to its median y, is CLAMPED to +/- max_disp_lh
+        line-heights, heavily smoothed, and ANCHORED to zero along the crop's top and
+        bottom edges so it can never ripple art sitting just above/below the text.
+      * Otherwise (few lines, short/split tracks, captions, headings) it falls back to
+        a SINGLE-ANGLE deskew: the whole block is rotated by one angle, so every line
+        stays straight and parallel -- a line can never be bent into a V by how the
+        block was split. Applied only for a real tilt (min_deskew..max_deskew deg);
+        below/above that the block is left exactly as scanned.
+
+    Returns (result, max_disp_px, mode) where mode is 'field' | 'deskew' | 'none'.
+    """
+    H, W = crop.shape[:2]
+    xs, tracks, N = _track_baselines(crop)
+
+    # reliable = full-span baselines only; a split half-line (< span_frac) is excluded
+    # so it can never pull one end of a line to a different level (no V / kink).
+    need = max(4, int(span_frac * N))
+    reliable = [tr for tr in tracks if len(tr) >= need]
+
+    if len(reliable) >= 2:
+        mids = sorted(float(np.median([y for _, y in tr])) for tr in reliable)
+        gaps = np.diff(mids)
+        lh = float(np.median(gaps)) if len(gaps) else 40.0
+    else:
+        lh = 40.0
+    clamp = max(6.0, max_disp_lh * lh)
+
+    if len(reliable) >= min_field_lines:
+        pts, dys = [], []
+        for tr in reliable:
+            ys = np.array([y for _, y in tr]); target = float(np.median(ys))
+            for (bi, y) in tr:
+                pts.append((xs[bi], y))
+                dys.append(float(np.clip(target - y, -clamp, clamp)))
+        step = max(20, W // 24)
+        for xx in range(0, W, step):                    # pin top & bottom edges to 0
+            pts.append((xx, 0)); dys.append(0.0)
+            pts.append((xx, H - 1)); dys.append(0.0)
+        pts = np.array(pts); dys = np.array(dys)
+        gx, gy = np.meshgrid(np.arange(W), np.arange(H))
+        D = griddata(pts, dys, (gx, gy), method='linear')
+        Dn = griddata(pts, dys, (gx, gy), method='nearest')
+        D[np.isnan(D)] = Dn[np.isnan(D)]
+        D = np.clip(D, -clamp, clamp)
+        D = gaussian_filter(D.astype(np.float32), smooth)
+        cand = cv2.remap(crop, gx.astype(np.float32), (gy - D).astype(np.float32),
+                         interpolation=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+        mag, mode = float(np.abs(D).max()), 'field'
+    else:
+        ang = _baseline_tilt_deg(tracks, xs)           # single-angle deskew (no V)
+        if min_deskew <= abs(ang) <= max_deskew:
+            M = cv2.getRotationMatrix2D((W / 2.0, H / 2.0), -ang, 1.0)
+            cand = cv2.warpAffine(crop, M, (W, H), flags=cv2.INTER_CUBIC,
+                                  borderMode=cv2.BORDER_REPLICATE)
+            mag, mode = float(abs(np.sin(np.radians(ang))) * W / 2.0), 'deskew'
+        else:
+            cand, mag, mode = crop, 0.0, 'none'
+
+    if mode == 'none':
+        return crop, 0.0, 'none'
+
+    # SELF-VERIFY: keep the correction ONLY if it measurably flattened the baselines.
+    # A wrong sign, a mis-track, or a sparse block can never make text worse -- it is
+    # left exactly as scanned instead.
+    before = _flatness(tracks, N)
+    _, tracks2, N2 = _track_baselines(cand)
+    after = _flatness(tracks2, N2)
+    if before > 1.0 and after < 0.9 * before:
+        return cand, mag, mode
+    return crop, 0.0, 'none'

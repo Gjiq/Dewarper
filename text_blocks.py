@@ -277,3 +277,34 @@ def deskew_text_blocks(canvas, art_boxes, dark_text=True, min_lines=2,
         canvas[py:py+rh, px:px+rw] = dst
         placed.append(foot); angles.append(ang)
     return canvas, angles
+
+
+def dewarp_text_areas(canvas, art_boxes, dark_text=True, min_lines=1, sat_max=70,
+                      min_disp=3.0, pad_frac=0.05):
+    """Detect every text area (>= min_lines) and CURL-dewarp each independently.
+
+    Columns are separated automatically (find_blocks clusters lines by x-overlap, so
+    side-by-side columns never merge), and each column / heading / caption gets its
+    OWN baseline field -- so a column that curls differently from its neighbour is
+    corrected on its own. min_lines=1 also catches bold 1-2 line titles. A block is
+    left exactly as-is if it sits on art, is colourful (a plate), or its measured
+    warp is below min_disp px (clean text is never needlessly re-sampled). Returns
+    (canvas, n_dewarped)."""
+    import dewarp_text as _dt
+    H, W = canvas.shape[:2]
+    hsv = cv2.cvtColor(canvas, cv2.COLOR_BGR2HSV)
+    blocks = find_blocks(canvas, dark_text, min_lines=min_lines, exclude_boxes=art_boxes)
+    n = 0
+    for b in sorted(blocks, key=lambda b: (b[1], b[0])):
+        x, y, w, h = b[:4]
+        if float(hsv[y:y+h, x:x+w, 1].mean()) > sat_max:
+            continue
+        pad = int(pad_frac * max(w, h))
+        x0, y0 = max(0, x - pad), max(0, y - pad)
+        x1, y1 = min(W, x + w + pad), min(H, y + h + pad)
+        crop = canvas[y0:y1, x0:x1]
+        dw, mag, mode = _dt.dewarp_text_area(crop)
+        if mode != 'none' and mag >= min_disp:
+            canvas[y0:y1, x0:x1] = dw
+            n += 1
+    return canvas, n
