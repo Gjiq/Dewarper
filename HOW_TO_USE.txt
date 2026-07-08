@@ -12,17 +12,21 @@ WHAT IT DOES
 RUNNING IT  (pick whichever is easiest)
 ----------------------------------------------------------------
 
-  1) DRAG AND DROP  (simplest)
-     Drag the FOLDER that holds your page scans onto the
-     dewarp program. It runs on its own and saves the results
-     to a new folder right next to it called:
-          <your folder>_reconstructed
+  1) DRAG AND DROP  (simplest) — drop any of these onto the app:
+       * A FOLDER of page scans -> results go to a new folder next
+         to it called   <your folder>_reconstructed
+       * A SINGLE page file     -> its result is saved right beside
+         the original as   <name>_reconstructed.jpg
+       * SEVERAL loose page files at once -> results collect in a
+         folder   dewarp_reconstructed   next to the first file.
 
   2) DOUBLE-CLICK
-     A window opens and asks for the folder. Paste the full
-     path to the folder of scans and press Enter.
+     A window opens and asks for a folder (or a single page file).
+     Paste the full path and press Enter.
 
   3) FROM A TERMINAL / COMMAND PROMPT
+          dewarp "C:\path\to\pages"                 (a folder)
+          dewarp "page1.jpg" "page2.jpg"            (loose files)
           dewarp --input "C:\path\to\pages" --output "C:\path\to\out"
      Add  --cached-profile  to reuse a saved paper profile.
 
@@ -47,6 +51,8 @@ GOOD TO KNOW
     are driven by your magenta markup and are worth a quick look
     afterwards — automatic handling can occasionally misjudge a
     page. Always eyeball the output.
-  * Nothing is ever written back into your input folder; results
-    only go to the output folder.
+  * Your original scans are never modified or overwritten. Folder
+    and multi-file drops write results to a separate output folder;
+    a single dropped file gets one clearly-named _reconstructed.jpg
+    saved beside it.
 ================================================================

@@ -382,6 +382,24 @@ def classify_page(img_bgr):
             if _count_text_lines(zone) > 30:
                 return 'TEXT_LEFT', bg
 
+    # ── Side text column on the RIGHT (v68) ───────────────────────────────────
+    # Mirror of the left test: art bleeds off the LEFT edge (high leftmost_sat) and the
+    # credit column sits against the RIGHT margin (low rightmost_sat). Same >30 real-line
+    # guard keeps full-bleed plates with a plain right paper margin out. Returns TEXT_LEFT
+    # because the side-text branch (detect_panels + deskew_side_text) is now side-aware and
+    # handles a column on either side; only genuine text columns reach it.
+    if rightmost_sat < 35:
+        strip_start = W
+        for x in range(W - 1, W // 2, -1):
+            if col_sat[x] > 50:
+                strip_start = x
+                break
+        if strip_start < W - 50:
+            zin  = gray[:, strip_start:min(strip_start + 200, W)]  # left-justified col: dense at its left edge
+            zout = gray[:, W - 200:]                               # right-justified col: dense at the page edge
+            if max(_count_text_lines(zin), _count_text_lines(zout)) > 30:
+                return 'TEXT_LEFT', bg
+
     # Bilateral binder margins with no text column = centered art panel
     if leftmost_sat < 35 and rightmost_sat < 35:
         return 'FULL_BLEED', bg
@@ -391,6 +409,33 @@ def classify_page(img_bgr):
 
 # Pages that auto-classification gets wrong — override here
 PAGE_OVERRIDES = {
+    # Spectrum 17 p044/p059/p065/p104/p105 (v72): classify_page sent five real full-bleed
+    # PAINTINGS / multi-plate showcase pages to SKIP via the "mottled / decorative leaf"
+    # branch (heavy saturated coverage on a dark-ish ground, colour cov 30-76%%, meanL
+    # 130-165). Verified this session by MEASUREMENT + a forced-reconstruction test (inline
+    # image viewer down): forcing FULL_BLEED preserves coverage (in->out 76.2->73.4,
+    # 49.6->46.2, 72.0->68.8, 30.8->29.2, 29.6->24.4) with sensible plate counts under v71's
+    # stacked-plate split (p059->3, p104->3, p044/p065/p105->1), none a spurious box. Same
+    # surgical fix as Spectrum 22/24/16/13/12 -- do NOT loosen classify_page. p003 is a
+    # genuine blank leaf (meanL 255, 0%% colour) and is correctly left as SKIP.
+    'Spectrum 17_Page_044.jpg': 'FULL_BLEED',
+    'Spectrum 17_Page_059.jpg': 'FULL_BLEED',
+    'Spectrum 17_Page_065.jpg': 'FULL_BLEED',
+    'Spectrum 17_Page_104.jpg': 'FULL_BLEED',
+    'Spectrum 17_Page_105.jpg': 'FULL_BLEED',
+    # Spectrum 2 side-text pages (v68). classify_page's side-column line count samples a
+    # narrow 200px zone at the margin; these credit columns are indented / short enough
+    # (17-27 real lines, verified this session by full-column line count + a clean
+    # left-margin fit residual on the whitened canvas) that they miss the >30 gate and fell
+    # to FULL_BLEED. 157 is the RIGHT-side case (art on the left, credit column on the
+    # right). All are genuine columns; detect_panels + deskew_side_text pick the side and
+    # stand the justified edge vertical. Surgical, per convention -- do NOT loosen
+    # classify_page (its gate is shared with real full-bleed plates that score 20-30).
+    'Spectrum 2_Page_024.jpg': 'TEXT_LEFT',
+    'Spectrum 2_Page_030.jpg': 'TEXT_LEFT',
+    'Spectrum 2_Page_032.jpg': 'TEXT_LEFT',
+    'Spectrum 2_Page_034.jpg': 'TEXT_LEFT',
+    'Spectrum 2_Page_157.jpg': 'TEXT_LEFT',
     # Spectrum 24 p009/p106/p202: classify_page sent three real full-bleed PAINTINGS
     # to SKIP via the "mottled / decorative leaf" branch (colour cov 23-70%, meanL
     # 131-157, dark ground). p010 (colour 7%, ink 16%, meanL 167) also dropped: a
@@ -581,16 +626,32 @@ def detect_panels(img_bgr, page_type, bg_level, exclude_mask=None):
         return sorted(boxes, key=lambda b: (b[1], b[0])) or [(0, 0, W, H)]
 
 
-    # TEXT_LEFT: find art panels using Canny, exclude text column
+    # SIDE-TEXT: find art panels using Canny, excluding the credit text column, which may sit
+    # on EITHER side of the plate (v68). The text side is the low-saturation edge; art bleeds
+    # off the other edge. text_lo..text_hi brackets the art zone (everything outside the column).
     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
     sat = hsv[:,:,1]
 
-    # Locate text column right edge
     col_sat = uniform_filter1d(sat.mean(axis=0).astype(float), size=50)
-    text_col_right = 0
-    leftmost_sat = col_sat[:int(W*0.03)].mean()
-    if leftmost_sat < 35:
+    leftmost_sat  = col_sat[:int(W*0.03)].mean()
+    rightmost_sat = col_sat[int(W*0.97):].mean()
+
+    text_col_right = 0    # right edge of a LEFT column  (art starts here, runs to W)
+    text_col_left  = W    # left edge of a RIGHT column  (art runs from 0 to here)
+    text_side = 'left'
+    if leftmost_sat < 35 and rightmost_sat >= leftmost_sat:
         for x in range(W // 2):
+            if col_sat[x] > 50:
+                text_col_right = x
+                break
+    elif rightmost_sat < 35:
+        text_side = 'right'
+        for x in range(W - 1, W // 2, -1):
+            if col_sat[x] > 50:
+                text_col_left = x
+                break
+    else:
+        for x in range(W // 2):          # fallback: original left behaviour
             if col_sat[x] > 50:
                 text_col_right = x
                 break
@@ -605,8 +666,11 @@ def detect_panels(img_bgr, page_type, bg_level, exclude_mask=None):
         x,y,w,h = cv2.boundingRect(c)
         if w*h < 0.015*W*H or w < 80 or h < 80 or h >= H:
             continue
-        # Exclude if mostly in text column zone
-        if x + w//2 < text_col_right + 50:
+        # Exclude if mostly in the text-column zone (correct side)
+        cx = x + w//2
+        if text_side == 'left' and cx < text_col_right + 50:
+            continue
+        if text_side == 'right' and cx > text_col_left - 50:
             continue
         # Reject very low saturation blobs (binder margins, white strips)
         patch = img_bgr[y:y+h, x:x+w]
@@ -620,7 +684,9 @@ def detect_panels(img_bgr, page_type, bg_level, exclude_mask=None):
         # If blob spans nearly full width AND full height, it's a merged blob.
         # Split it by finding horizontal white gaps (rows > 80% white) in the middle third.
         if w > W * 0.7 and h > H * 0.5:
-            sub_gray = gray[y:y+h, max(0, text_col_right):]
+            art_lo = text_col_right if text_side == 'left' else 0
+            art_hi = text_col_left  if text_side == 'right' else W
+            sub_gray = gray[y:y+h, max(0, art_lo):art_hi]
             row_means = sub_gray.mean(axis=1)
             gap_threshold = max(180, WHITE - 30)
             gap_rows = np.where(row_means > gap_threshold)[0]
@@ -629,24 +695,30 @@ def detect_panels(img_bgr, page_type, bg_level, exclude_mask=None):
             mid_gaps = gap_rows[(gap_rows > mid_lo) & (gap_rows < mid_hi)]
             if len(mid_gaps) >= 5:
                 split_y = y + int(np.median(mid_gaps[:10]))
+                aw = art_hi - art_lo
                 # Top sub-panel
                 if split_y - y > 100:
-                    boxes.append((text_col_right, y, W - text_col_right, split_y - y))
+                    boxes.append((art_lo, y, aw, split_y - y))
                 # Bottom sub-panel
                 if (y + h) - split_y > 100:
-                    boxes.append((text_col_right, split_y, W - text_col_right, (y + h) - split_y))
+                    boxes.append((art_lo, split_y, aw, (y + h) - split_y))
                 continue
 
         boxes.append((x,y,w,h))
 
     if not boxes:
-        # Fallback: content to the right of text column
-        cx = max(text_col_right, int(W*0.05))
-        content = (gray[:, cx:] < WHITE).astype(np.uint8)
+        # Fallback: content on the art side of the text column
+        if text_side == 'right':
+            cx1 = min(text_col_left, int(W*0.95))
+            content = (gray[:, :cx1] < WHITE).astype(np.uint8)
+            xoff = 0
+        else:
+            xoff = max(text_col_right, int(W*0.05))
+            content = (gray[:, xoff:] < WHITE).astype(np.uint8)
         rows = np.where(content.any(axis=1))[0]
         cols = np.where(content.any(axis=0))[0]
         if len(rows) and len(cols):
-            boxes = [(cx + int(cols[0]), int(rows[0]),
+            boxes = [(xoff + int(cols[0]), int(rows[0]),
                       int(cols[-1]-cols[0]), int(rows[-1]-rows[0]))]
 
     return sorted(boxes, key=lambda b:(b[1]//500, b[0]))
@@ -654,14 +726,18 @@ def detect_panels(img_bgr, page_type, bg_level, exclude_mask=None):
 
 # ── Clean straight crop ───────────────────────────────────────────────────────
 
-def clean_crop(img_bgr, bx, by, bw, bh, bg_level, search=100, smooth=60):
+def clean_crop(img_bgr, bx, by, bw, bh, bg_level, search=100, smooth=60, pix=None):
     """
     Scan inward from each bbox edge to find the printed border.
     90th-percentile of each edge profile = deepest inward position
     = guaranteed straight rectangular cut.
     Returns (cropped_image, (abs_x0, abs_y0, abs_x1, abs_y1))
+    All edge measurements are made on img_bgr; if `pix` is given the returned pixels are
+    taken from `pix` at the same rectangle (used to source a plate from the whitened canvas
+    while keeping the crop geometry measured on the raw scan).
     """
     H, W = img_bgr.shape[:2]
+    src = pix if pix is not None else img_bgr
     WHITE = bg_level - 20
     gray  = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY).astype(float)
     sy    = np.abs(np.diff(gray, axis=0))
@@ -707,35 +783,61 @@ def clean_crop(img_bgr, bx, by, bw, bh, bg_level, search=100, smooth=60):
     x0c = max(0,x0c); x1c = min(W,x1c)
 
     if y1c <= y0c or x1c <= x0c:
-        return img_bgr[by:by+bh, bx:bx+bw].copy(), (bx,by,bx+bw,by+bh)
+        return src[by:by+bh, bx:bx+bw].copy(), (bx,by,bx+bw,by+bh)
 
-    return img_bgr[y0c:y1c, x0c:x1c].copy(), (x0c, y0c, x1c, y1c)
+    return src[y0c:y1c, x0c:x1c].copy(), (x0c, y0c, x1c, y1c)
 
 
-def deslope_crop(img_bgr, bx, by, bw, bh, bg_level, min_angle=0.08):
+def deslope_crop(img_bgr, bx, by, bw, bh, bg_level, min_angle=0.08, pix=None):
     """clean_crop, but first remove the panel's tilt. _reliable_angle measures the
     panel's rotation off its strong edges (and self-rejects via its residual gate,
     returning ~0 when no trustworthy angle exists). If the tilt is meaningful, a
     padded region around the box is rotated about the box centre, then clean_crop
     makes its straight cut on the now-upright panel. Pasting at the returned page
     coords lands it back in place (rotation about the centre preserves position).
-    Falls back to plain clean_crop when the panel is already square."""
+    Falls back to plain clean_crop when the panel is already square.
+    Angle + crop are measured on img_bgr; when `pix` is supplied the returned pixels are
+    sampled from `pix` (rotated by the SAME transform), so a plate can be taken from the
+    whitened canvas while its geometry is decided on the raw scan."""
     theta = _reliable_angle(img_bgr, (bx, by, bw, bh), bg_level)
     if abs(theta) < min_angle:
-        clean, pos = clean_crop(img_bgr, bx, by, bw, bh, bg_level)
+        clean, pos = clean_crop(img_bgr, bx, by, bw, bh, bg_level, pix=pix)
         return clean, pos, 0.0
     H, W = img_bgr.shape[:2]
     pad = int(0.06 * max(bw, bh))
     sx0, sy0 = max(0, bx - pad), max(0, by - pad)
     sx1, sy1 = min(W, bx + bw + pad), min(H, by + bh + pad)
     sub = img_bgr[sy0:sy1, sx0:sx1]
+    sub_pix = pix[sy0:sy1, sx0:sx1] if pix is not None else None
     sH, sW = sub.shape[:2]
     cx, cy = (bx + bw / 2.0 - sx0), (by + bh / 2.0 - sy0)
     M = cv2.getRotationMatrix2D((cx, cy), theta, 1.0)
     rot = cv2.warpAffine(sub, M, (sW, sH), flags=cv2.INTER_CUBIC,
                          borderMode=cv2.BORDER_REPLICATE)
-    clean, (rx0, ry0, rx1, ry1) = clean_crop(rot, bx - sx0, by - sy0, bw, bh, bg_level)
+    rot_pix = (cv2.warpAffine(sub_pix, M, (sW, sH), flags=cv2.INTER_CUBIC,
+                              borderMode=cv2.BORDER_REPLICATE)
+               if sub_pix is not None else None)
+    clean, (rx0, ry0, rx1, ry1) = clean_crop(rot, bx - sx0, by - sy0, bw, bh, bg_level, pix=rot_pix)
     return clean, (sx0 + rx0, sy0 + ry0, sx0 + rx1, sy0 + ry1), theta
+
+
+# NOTE (v69): side-text plates match the whitened canvas paper without losing art colour.
+# The plate is cropped TWICE with identical geometry (angle + rectangle measured on the raw
+# scan): once sampling raw pixels (full-fidelity art) and once sampling the flat-fielded
+# canvas (paper at ~246, no vignette). _blend_plate_paper keeps the raw ART and takes only
+# the PAPER margin from the canvas, blended on a smooth paper mask -- so the plate's paper
+# equals the text column's (no seam) while colour/detail and dark/dense art are untouched.
+def _blend_plate_paper(art_raw, paper_src):
+    if art_raw.shape != paper_src.shape:
+        return art_raw
+    hsv = cv2.cvtColor(art_raw, cv2.COLOR_BGR2HSV)
+    val = hsv[:, :, 2].astype(np.float32)
+    sat = hsv[:, :, 1].astype(np.float32)
+    w = np.clip((val - 138.0) / 58.0, 0, 1) * np.clip((49.0 - sat) / 26.0, 0, 1)
+    w = cv2.GaussianBlur(w, (0, 0), 2.0)              # feather the paper/art boundary
+    w = w[..., None]
+    out = art_raw.astype(np.float32) * (1.0 - w) + paper_src.astype(np.float32) * w
+    return np.clip(out, 0, 255).astype(np.uint8)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -1160,13 +1262,25 @@ for fname in files:
     boxes = detect_panels(img, page_type, bg)
     print(f' -> {len(boxes)} panels', end='')
 
+    # v67: TILT-correct the credit column BEFORE the panel deslope, on the clean whitened
+    # canvas. The column may be on EITHER side of the plate (side-text, not just left-text);
+    # deskew_side_text picks the text side and stands its justified edge vertical. Measuring
+    # after the deslope pooled a rotated panel edge and OVER-rotated the text.
+    if DEWARP_TEXT_CURL:
+        canvas, _ta = text_blocks.deskew_side_text(canvas, boxes, dark_text=True)
+        if abs(_ta) > 0.001:
+            print(f'    side-text deskew: {_ta:+.2f} deg')
+
     desloped = []
     for (bx, by, bw, bh) in boxes:
         if DESLOPE_TEXT:
             clean, (cx0, cy0, cx1, cy1), theta = deslope_crop(img, bx, by, bw, bh, bg)
+            clean_c, _, _ = deslope_crop(img, bx, by, bw, bh, bg, pix=canvas)
         else:
             clean, (cx0, cy0, cx1, cy1) = clean_crop(img, bx, by, bw, bh, bg)
+            clean_c, _ = clean_crop(img, bx, by, bw, bh, bg, pix=canvas)
             theta = 0.0
+        clean = _blend_plate_paper(clean, clean_c)   # v69: canvas paper, raw art
         desloped.append(theta)
         cH, cW = clean.shape[:2]
         dy0=max(0,cy0); dy1=min(H,cy0+cH)

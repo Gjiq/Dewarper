@@ -1,4 +1,4 @@
-DEWARP PIPELINE — v63
+DEWARP PIPELINE — v72
 ====================
 (Scanned art-plate reconstruction.)
 Deskews, crops and whitens scanned art-annual pages so each printed artwork is
@@ -8,10 +8,10 @@ folder into a session to run.
 >>> HANDOVER NAMING — DO THIS EVERY TIME <<<
   This pipeline is called "Dewarp Pipeline". Whenever you produce a new handover
   zip, name it  Dewarp_Pipeline_v<N>.zip  where <N> is the previous version + 1.
-  This build is v49, so the next handover is v50, then v51, and so on — never reuse a
+  This build is v71, so the next handover is v72, then v73, and so on — never reuse a
   number, never drop the name. After bumping it, update the "DEWARP PIPELINE — v<N>"
   line at the top of this file to match, so the version always travels with the code.
-  This build is v63; the next handover is v64.
+  This build is v72; the next handover is v73.
 
 >>> READ FIRST — THIS IS AN IMAGE PIPELINE <<<
   The deliverable is RENDERED JPEG FILES, never text. When the user posts page
@@ -34,6 +34,94 @@ folder into a session to run.
   Deps already expected: opencv-python (cv2), numpy, scipy.
 
 IMPROVEMENTS BAKED IN (this build — keep all of them)
+  - NEW v72 — SPECTRUM 17 SKIP PAGES PINNED (PAGE_OVERRIDES). Code is otherwise IDENTICAL
+    to v71; the only change is five page-type overrides for the Spectrum 17 batch (pages
+    001-289, run through this build). classify_page sent five real full-bleed PAINTINGS /
+    multi-plate showcase pages to SKIP via the "mottled / decorative leaf" branch (heavy
+    saturated coverage on a dark-ish ground, colour cov 30-76%%, meanL 130-165):
+      * 'Spectrum 17_Page_044.jpg' -> FULL_BLEED. Single plate (76.2%% colour); cov 76.2->74.0.
+      * 'Spectrum 17_Page_059.jpg' -> FULL_BLEED. 3-plate page (49.6%%); cov 49.6->49.4.
+      * 'Spectrum 17_Page_065.jpg' -> FULL_BLEED. Single plate (72.0%%); cov 72.0->70.1.
+      * 'Spectrum 17_Page_104.jpg' -> FULL_BLEED. Multi-plate page (30.8%%); cov 30.8->32.2.
+        NOTE: v71's page-decurl put a large field on p104 ([-151,+64.6]px, ~4.3%% H, just
+        under the 5%% degenerate-field reject cap) and the page then detected 3 plates where
+        a decurl-suppressed render detects 4. No tearing (coverage + aspect preserved; edge
+        waviness ~equal, 14.8 vs 15.4px), so shipped as v71 produced it -- but this page in
+        particular should be EYEBALLED; if the decurl looks over-corrected, a decurl-
+        suppressed alternate was rendered this session and is the drop-in fix.
+      * 'Spectrum 17_Page_105.jpg' -> FULL_BLEED. Single plate (29.6%%); cov 29.6->27.9.
+    Same surgical fix as Spectrum 22/24/16/13/12 -- do NOT loosen classify_page. p003 is a
+    genuine blank leaf (meanL 255, 0%% colour) and is correctly left as SKIP. Verified this
+    session by MEASUREMENT + a forced-reconstruction test (input->output colour-coverage
+    retained, no spurious-box collapse) because the inline image viewer was down -- the five
+    reconstructions (esp. p104) should still be eyeballed once a viewer works. Source arrived
+    as a 4-part RAR5; 'unar'/libarchive truncated 22 entries, so reference 'unrar' was used.
+  - NEW v71 — STACKED-PLATE SPLIT + OVERLAP RESOLUTION (fixes "grossly enlarged art dropped
+    on the neighbour" on multi-plate showcase pages, e.g. Spectrum 11 p59/93/105/109). The
+    permissive batch mask (large dv/s_max) can bridge the paper GUTTER between two vertically
+    -stacked plates in one column, fusing them into a single full-height component. Left
+    merged, that box took the TOP plate's full width and ran it down the whole page, so it was
+    composited on top of the neighbour below it. art_pictures now, after detection: (1)
+    _split_stacked_plates — a near-full-height box (>=80%% H) with a bright PAPER band across
+    its interior is cut at that band into its two real plates; (2) _resolve_box_overlaps — any
+    two boxes that still overlap are clipped back to the paper gutter running through the
+    overlap (vertical gutter for a side-by-side pair, horizontal for a stacked pair). Result:
+    each plate is its own correctly-sized box and nothing laps over its neighbour. Gated on a
+    real paper gutter, so ordinary single plates and well-separated multi-plate pages are
+    untouched. Bonus: with the plates properly separated the page-decurl gets well-spread edges
+    and settles to a gentle field instead of a wild extrapolated one.
+  - NEW v70 — DRAG-AND-DROP OF FILES (not just folders). The app front-end (dewarp_cli.py)
+    now accepts, in addition to a dropped FOLDER: a SINGLE page file (result written next to
+    the original as <name>_reconstructed.jpg), and SEVERAL loose page files at once (results
+    collect in <folder-of-first-file>/dewarp_reconstructed). On Windows a drag-and-drop hands
+    the exe the file paths as argv, so the CLI takes any mix of files/folders. Loose files are
+    hard-linked (copy only as a cross-drive fallback) into one temp dir and fed to the SAME
+    reconstruct.py directory scan -- so magenta pairing still works when you drop a marked page
+    and its clean original together, and reconstruct.py itself is unchanged. Terminal forms:
+    `dewarp ./pages`, `dewarp p1.jpg p2.jpg`, `dewarp -i ./pages -o ./out`. Double-click still
+    prompts. The PyInstaller entry point is unchanged (still dewarp_cli.py), so the build is
+    unaffected.
+  - NEW v69 — SIDE-TEXT PLATE PAPER MATCHES THE TEXT COLUMN (no seam). A side-text page's
+    text column is flat-field-whitened (paper ~246) but the plate was cropped from the RAW
+    scan, so its paper margin kept the scan's cream/vignette tone -- a visible seam where the
+    plate met the whitened column. Fix: the plate is now cropped TWICE with IDENTICAL geometry
+    (deslope angle + border rectangle still measured on the RAW scan, unchanged/proven) --
+    once sampling raw pixels, once sampling the flat-fielded canvas -- via a new `pix=` source
+    arg on clean_crop/deslope_crop. _blend_plate_paper then keeps the RAW artwork and takes
+    only the PAPER margin from the canvas, blended on a smooth (feathered) paper mask gated on
+    brightness AND low saturation. Result: plate paper = column paper (seam gap +13..+31 -> <=3
+    across the Spectrum 2 batch), while colour/detail is untouched (strong colour within ~1%,
+    pale colour within ~4%) and dark/dense plates (e.g. p157) are unaffected -- the saturation
+    gate leaves coloured art on the raw crop, only near-neutral paper is pulled to white.
+  - NEW v68 — RIGHT-SIDE TEXT COLUMNS WIRED UP. A credit column can sit on EITHER side of
+    the plate. v67 made deskew_side_text side-aware but classify_page/detect_panels still
+    only DETECTED a LEFT column, so an art-left / text-right page (e.g. Spectrum 2 p157)
+    fell to FULL_BLEED and never reached the side-text path. Now: (a) classify_page has a
+    symmetric RIGHT branch (low rightmost_sat + >30 real text lines, measured at the
+    column's justified edge -- inward for a left-justified column, outward for a
+    right-justified one) -> returns TEXT_LEFT; verified it flips NO existing page (every
+    non-text page scores 0 in the right zone). (b) detect_panels is SIDE-AWARE: it reads
+    the text side from leftmost/rightmost saturation and excludes the credit column on the
+    correct side, so the art plate (not the column) is the kept panel. deskew_side_text
+    already handles both sides, so p157's plate is found on the LEFT and its column on the
+    RIGHT.
+  - NEW v68 — ENVELOPE FIT for the justified-edge lean (_margin_lean). The edge is now fit
+    as the leading-edge ENVELOPE: short/indented rows sit to the INSIDE of the true edge
+    (right of a left edge, left of a right edge) and are dropped ASYMMETRICALLY. This stops
+    a wide column's ragged interior from inflating the fit residual and wrongly tripping the
+    noise guard. Result across the Spectrum 2 batch: p030 -0.67 deg and p032 -1.07 deg
+    corrected to vertical; p022/024/034 already straight -> DECLINED; p157's right column is
+    near-straight and irregular (unstable ~-0.2..-1.0 deg, resid >15) -> safely DECLINED
+    rather than rotated on a garbage estimate. ALL art pixels changed = 0 on every page.
+  - NEW v68 — PAGE_OVERRIDES for genuine Spectrum 2 side-text pages the >30-line gate
+    undercounts (indented/short columns of 17-27 real lines): p024/030/032/034 (left) and
+    p157 (right) -> TEXT_LEFT. Confirmed per page by full-column line count + a clean
+    left-margin fit residual on the whitened canvas. Surgical, per convention -- classify_page
+    was NOT loosened (its gate is shared with real full-bleed plates that score 20-30 in the
+    side zone; lowering it would regress e.g. Spectrum 9 p088/p092). p026 left out (its
+    column merged/ambiguous -- flag for eyeball).
+  - v67 carried forward — deskew_side_text (side-aware justified-edge leveling, measured
+    BEFORE the panel deslope) + the fixed-threshold (<130) margin measurement.
   - NEW v63 — ROBUST PAPER PROFILE (the big batch fix). build_paper_profile used p95(+30
     flat slack) of per-page paper saturation, which let a large/varied batch (100 pages)
     drift the s_max ceiling loose (101 vs 83 clean) -> loosened the art/paper test for

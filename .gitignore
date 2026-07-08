@@ -1,0 +1,14 @@
+# run artifacts / local
+paper_profile.json
+__pycache__/
+*.pyc
+.venv/
+out/
+output/
+*_reconstructed.jpg
+*_text.jpg
+*_skipped.jpg
+*.magboxes.json
+build/
+dist/
+*.spec

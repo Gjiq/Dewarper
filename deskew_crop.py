@@ -221,6 +221,15 @@ def _art_component(orig, bg, scale=0.34):
         m = (((val.astype(int) < (wp - prof['dv'])) | (sat > prof['s_max']))).astype(np.uint8)
     else:
         m = (((g.astype(int) < (bg - 14)) | (sat > 34))).astype(np.uint8)
+    # v70: also treat TEXTURED regions as art. LIGHT-toned art (a pale drawing / faint wash)
+    # can sit at or above the paper white-point with low saturation, so the value/sat test
+    # above misses it -- yet, unlike smooth paper, it carries fine detail. Without this the
+    # art bounding box stops short of the light art (typically along the page BOTTOM) and that
+    # art is later whitened / wiped to paper (Spectrum 11 p061/063/065/078/083-089...). Add
+    # medium-scale edge-dense regions; smooth paper reads ~0 and page text is removed next.
+    _edges = cv2.Canny(g, 40, 120)
+    _dens = cv2.blur((_edges > 0).astype(np.float32), (23, 23))
+    m = (m | (_dens > 0.055)).astype(np.uint8)
     m[_text_line_mask(sm) > 0] = 0        # v42: text is background, never art
     b = int(0.012 * sw)
     m[:b, :] = 0; m[-b:, :] = 0; m[:, :b] = 0; m[:, -b:] = 0
@@ -1164,10 +1173,21 @@ def _wipe_soft_bands(whp, keep, tmask, fill_img, pwl):
     areas = st[:, cv2.CC_STAT_AREA]
     flat = lab.ravel()
     meanS = np.bincount(flat, weights=S.ravel(), minlength=n) / np.maximum(np.bincount(flat, minlength=n), 1)
+    # v70: TEXTURE guard. A real scan-shadow band is SMOOTH (almost no internal edges); a
+    # patch of LIGHT-TONED art (a pale drawing / faint wash with detail) is also low-sat and
+    # soft-grey and can fall OUTSIDE the detected art crop, so without this it matched the
+    # band profile and got wiped -- erasing art, worst at the page bottom where the plate
+    # detector under-reaches (Spectrum 11 p061/063/065/081/083-089...). Measure Canny-edge
+    # density inside each candidate component's bounding box: a flat band reads ~0, light art
+    # reads well above. Components with real internal structure are left intact.
+    edges = cv2.Canny(cv2.cvtColor(whp, cv2.COLOR_BGR2GRAY), 40, 120)
     min_band = max(400, int(0.00015 * H * W))         # grain specks (< this) are despeckle's job
     for i in range(1, n):
         if areas[i] < min_band or meanS[i] >= 30:
             continue
+        bx, by, bw, bh = st[i, cv2.CC_STAT_LEFT], st[i, cv2.CC_STAT_TOP], st[i, cv2.CC_STAT_WIDTH], st[i, cv2.CC_STAT_HEIGHT]
+        if float((edges[by:by + bh, bx:bx + bw] > 0).mean()) > 0.018:
+            continue                                  # textured -> art, never wipe
         sel = lab == i
         Lmed = float(np.median(L[sel])); Sp90 = float(np.percentile(S[sel], 90))
         # wipe only a genuinely SOFT, LOW-SAT, non-ink band. Sp90 rejects a component that
@@ -1510,8 +1530,81 @@ def art_pictures(orig, bg, scale=0.34, min_area=0.035, min_dim=0.11,
                              max(p[2], box[2]), max(p[3], box[3])]
         # len(hits) == 0 -> isolated blob, drop;  len(hits) >= 2 -> would bridge, skip
     fx, fy = W/float(sw), H/float(sh)
-    return [[int(x0*fx), int(y0*fy), int(x1*fx), int(y1*fy)]
+    full = [[int(x0*fx), int(y0*fy), int(x1*fx), int(y1*fy)]
             for x0, y0, x1, y1 in pics]
+    full = _split_stacked_plates(orig, full)
+    full = _resolve_box_overlaps(orig, full)
+    return full
+
+
+def _split_stacked_plates(orig, boxes, min_h_frac=0.80, min_gutter_frac=0.011):
+    """Split a near-full-height box that actually holds TWO vertically-stacked plates
+    separated by a PAPER gutter. The permissive batch mask (large dv/s_max) can bridge
+    the paper gap between two plates in one column into a single tall component. Left
+    merged, that box takes the TOP plate's full width and runs it all the way down the
+    page, so it is composited on top of the neighbour below it (the 'grossly enlarged
+    art dropped on the neighbour' on Spectrum 11 p59/93/105/109). Find the bright paper
+    band spanning the box interior and cut the box into its two real plates."""
+    H, W = orig.shape[:2]
+    g = cv2.cvtColor(orig, cv2.COLOR_BGR2GRAY)
+    white = float(np.percentile(np.concatenate(
+        [g[:20].ravel(), g[-20:].ravel(), g[:, :20].ravel(), g[:, -20:].ravel()]), 85))
+    out = []
+    for (x0, y0, x1, y1) in boxes:
+        bh, bw = y1 - y0, x1 - x0
+        if bh < min_h_frac * H or bw < 0.12 * W:
+            out.append([x0, y0, x1, y1]); continue
+        ix0 = x0 + int(0.12 * bw); ix1 = x1 - int(0.12 * bw)
+        rowb = g[y0:y1, ix0:ix1].mean(axis=1)
+        n = len(rowb); lo, hi = int(0.20 * n), int(0.80 * n)
+        paper = np.where(rowb[lo:hi] > (white - 22))[0]
+        if paper.size == 0:
+            out.append([x0, y0, x1, y1]); continue
+        runs = np.split(paper, np.where(np.diff(paper) > 4)[0] + 1)
+        band = max(runs, key=len)
+        if len(band) < max(30, int(min_gutter_frac * H)):
+            out.append([x0, y0, x1, y1]); continue
+        cut0 = y0 + lo + int(band[0]); cut1 = y0 + lo + int(band[-1])
+        out.append([x0, y0, x1, cut0])
+        out.append([x0, cut1, x1, y1])
+    return out
+
+
+def _resolve_box_overlaps(orig, boxes, iters=4):
+    """Clip overlapping detected boxes so no plate is composited on top of another.
+    For each overlapping pair, cut both boxes back to the PAPER gutter that runs
+    through the overlap: a vertical gutter for a side-by-side overlap (the taller
+    overlap), a horizontal gutter for a stacked one."""
+    H, W = orig.shape[:2]
+    g = cv2.cvtColor(orig, cv2.COLOR_BGR2GRAY)
+    b = [list(x) for x in boxes]
+    for _ in range(iters):
+        moved = False
+        for i in range(len(b)):
+            for j in range(i + 1, len(b)):
+                a, c = b[i], b[j]
+                ox = min(a[2], c[2]) - max(a[0], c[0])
+                oy = min(a[3], c[3]) - max(a[1], c[1])
+                if ox <= 0 or oy <= 0:
+                    continue
+                gx0, gx1 = max(a[0], c[0]), min(a[2], c[2])
+                gy0, gy1 = max(a[1], c[1]), min(a[3], c[3])
+                if gx1 - gx0 < 2 or gy1 - gy0 < 2:
+                    continue
+                if oy >= ox:                                   # side by side -> vertical gutter
+                    col = g[gy0:gy1, gx0:gx1].mean(axis=0)
+                    cut = gx0 + int(np.argmax(col))
+                    left, right = (a, c) if (a[0] + a[2]) < (c[0] + c[2]) else (c, a)
+                    left[2] = min(left[2], cut); right[0] = max(right[0], cut)
+                else:                                          # stacked -> horizontal gutter
+                    row = g[gy0:gy1, gx0:gx1].mean(axis=1)
+                    cut = gy0 + int(np.argmax(row))
+                    top, bot = (a, c) if (a[1] + a[3]) < (c[1] + c[3]) else (c, a)
+                    top[3] = min(top[3], cut); bot[1] = max(bot[1], cut)
+                moved = True
+        if not moved:
+            break
+    return [x for x in b if x[2] - x[0] > 0.05 * W and x[3] - x[1] > 0.05 * H]
 
 
 def _center_content(page, pic_rects):

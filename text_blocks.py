@@ -308,3 +308,89 @@ def dewarp_text_areas(canvas, art_boxes, dark_text=True, min_lines=1, sat_max=70
             canvas[y0:y1, x0:x1] = dw
             n += 1
     return canvas, n
+
+
+def _margin_lean(gray_win, side, H, min_rows, thr=130):
+    """Robust line fit of a text column's JUSTIFIED edge. side 'L' reads the leftmost ink of
+    each row, 'R' the rightmost. The justified edge is the leading-edge envelope: short or
+    indented rows sit to the INSIDE of it (right of a left edge, left of a right edge) and are
+    dropped asymmetrically, so the fit tracks the true edge and the window width doesn't matter.
+    Returns (lean_deg, resid_px, n_rows) or None."""
+    import numpy as np
+    rows = []
+    for y in range(int(H * 0.05), int(H * 0.95)):
+        d = np.where(gray_win[y] < thr)[0]
+        if len(d) > 3:
+            rows.append((y, int(d[0]) if side == 'L' else int(d[-1])))
+    if len(rows) < min_rows:
+        return None
+    ys = np.array([r[0] for r in rows], float)
+    xs = np.array([r[1] for r in rows], float)
+    A = np.polyfit(ys, xs, 1)
+    for _ in range(6):
+        res = xs - np.polyval(A, ys)
+        scale = np.median(np.abs(res - np.median(res))) * 1.4 + 3.0
+        if side == 'L':
+            keep = (res < 2.0 * scale) & (res > -4.0 * scale)   # drop indented (far-right) rows
+        else:
+            keep = (res > -2.0 * scale) & (res < 4.0 * scale)   # drop indented (far-left) rows
+        if keep.sum() < min_rows:
+            break
+        ys, xs = ys[keep], xs[keep]
+        A = np.polyfit(ys, xs, 1)
+    return (float(np.degrees(np.arctan(A[0]))),
+            float((xs - np.polyval(A, ys)).std()), len(rows))
+
+
+def deskew_side_text(canvas, art_boxes, dark_text=True, min_deg=0.35, max_deg=4.0,
+                     min_rows=30, resid_max=15.0):
+    """Straighten a tilted SIDE-TEXT credit column by standing its justified edge vertical.
+
+    The credit column may sit on EITHER side of the plate. This finds the art's horizontal
+    extent from the panel boxes, picks the side with the clear text column (left or right of
+    the art), then measures BOTH the column's left and right justified edges and rotates by
+    the negative lean of whichever edge is the cleaner straight line (lower fit residual) --
+    so a left-justified or a right-justified column, on either side of the page, all work.
+    Measuring the justified MARGIN is robust where baseline tracking is not (page-dewarp warps
+    baselines). A noisy/curved edge (high residual) is left alone rather than rotated on a bad
+    estimate. The rotation region is bounded to the text side, so plates stay byte-identical.
+    Returns (canvas, applied_angle_deg)."""
+    import numpy as np
+    H, W = canvas.shape[:2]
+    panels = [(ax, ay, aw, ah) for (ax, ay, aw, ah) in (art_boxes or [])
+              if aw > 0.10 * W and ah > 0.30 * H]
+    if panels:
+        art_x0 = min(ax for ax, _, _, _ in panels)
+        art_x1 = max(ax + aw for ax, _, aw, _ in panels)
+    else:                              # no real plate detected -> assume art in the middle
+        art_x0, art_x1 = int(W * 0.30), int(W * 0.70)
+    left_space, right_space = art_x0, W - art_x1
+    if left_space >= right_space and left_space > 0.12 * W:
+        tx0, tx1 = 0, max(20, art_x0 - 4)                 # text column on the LEFT
+    elif right_space > 0.12 * W:
+        tx0, tx1 = min(W - 20, art_x1 + 4), W             # text column on the RIGHT
+    else:
+        return canvas, 0.0                                # no clear side column
+    colw = tx1 - tx0
+    if colw < 60:
+        return canvas, 0.0
+    g = cv2.cvtColor(canvas[:, tx0:tx1], cv2.COLOR_BGR2GRAY)
+    mw = min(int(W * 0.20), colw)
+    resL = _margin_lean(g[:, :mw], 'L', H, min_rows)           # left justified edge
+    resR = _margin_lean(g[:, colw - mw:], 'R', H, min_rows)    # right justified edge
+    cands = [c for c in (resL, resR) if c is not None]
+    if not cands:
+        return canvas, 0.0
+    lean, resid, _ = min(cands, key=lambda c: c[1])           # the cleaner (justified) edge
+    if abs(lean) < min_deg or abs(lean) > max_deg or resid > resid_max:
+        return canvas, 0.0
+    region = canvas[:, tx0:tx1].copy()
+    rh, rw = region.shape[:2]
+    M = cv2.getRotationMatrix2D((rw / 2.0, rh / 2.0), -lean, 1.0)
+    canvas[:, tx0:tx1] = cv2.warpAffine(
+        region, M, (rw, rh), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    return canvas, -lean
+
+
+# backward-compatible name
+deskew_text_column = deskew_side_text

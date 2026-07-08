@@ -1,6 +1,19 @@
 """
 textpage / dewarp_text — text-page treatment for scanned pages.
 
+v64 — text-dewarp refinement (per-3-line local treatment):
+  * _track_baselines is now PITCH-AWARE (one peak per line); the old fixed
+    distance=18 locked onto sub-line features on high-res scans, halving the apparent
+    pitch and wrecking every downstream fit.
+  * dewarp_text_area now removes the LOW-FREQUENCY curl in groups of `band` (=3)
+    consecutive lines: each band pools its lines and fits ONE shared trend, so per-line
+    peak jitter cancels and only real local tilt/bow is corrected. Bands are feathered
+    (no seam); each line keeps its own median (spacing preserved). Accepted only if the
+    curl metric drops without adding jitter -> never warps text to tracking noise.
+  * Sparse but clearly-skewed blocks (e.g. the copyright/credits panel) get a
+    SIGN-ROBUST single-angle deskew (tries both rotation signs, keeps the flatter),
+    fixing tilts the old deskew rotated the wrong way and then self-rejected.
+
 Two operations, both keep/relocate original pixels (no OCR):
 
   dewarp(img)            curl correction. Detects text rows in vertical bands,
@@ -198,22 +211,39 @@ if __name__ == '__main__':
         print(path, 'done')
 
 
+def _estimate_pitch(dark, default=40.0):
+    """Line pitch (px) from the whole-crop darkness profile -- the median gap between
+    row peaks. Used to tune peak spacing so we lock ONE peak per text line instead of
+    sub-line features (serif / x-height structure), which on high-res scans otherwise
+    doubles the track count and halves the apparent pitch, wrecking the curl fit."""
+    prof = gaussian_filter(dark.mean(axis=1).astype(np.float32), 3)
+    pk, _ = find_peaks(prof, distance=20, prominence=5,
+                       height=prof.mean() + 0.25 * prof.std())
+    if len(pk) >= 3:
+        return float(np.clip(np.median(np.diff(pk)), 14.0, 200.0))
+    return default
+
+
 def _track_baselines(crop):
-    """Track text baselines across N vertical bands. Returns (xs, tracks, N)."""
+    """Track text baselines across N vertical bands, ONE peak per line. Returns
+    (xs, tracks, N). Peak spacing and match tolerance are tied to the estimated line
+    pitch so serifed / small-pitch scans still yield one baseline per line."""
     H, W = crop.shape[:2]
     N = int(min(44, max(12, W // 28)))
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
     dark = 255 - _flatfield_gray(gray)
+    pitch = _estimate_pitch(dark)
+    dist = max(14, int(pitch * 0.6))
+    tol = max(12.0, pitch * 0.45)
     bw = W / N
     xs, band_peaks = [], []
     for i in range(N):
         x0, x1 = int(i * bw), int((i + 1) * bw)
         xs.append((x0 + x1) / 2.0)
         prof = gaussian_filter(dark[:, x0:x1].mean(axis=1).astype(np.float32), 3)
-        pk, _ = find_peaks(prof, distance=18, prominence=5,
+        pk, _ = find_peaks(prof, distance=dist, prominence=5,
                            height=prof.mean() + 0.3 * prof.std())
         band_peaks.append(pk.astype(np.float32))
-    tol = 18 * 0.8
     tracks, active = [], []
     for i, pk in enumerate(band_peaks):
         used = [False] * len(pk); new_active = []
@@ -257,7 +287,7 @@ def _flatness(tracks, N):
     return float(np.mean(devs)) if devs else 0.0
 
 
-def dewarp_text_area(crop, smooth=(60, 30), min_field_lines=4, span_frac=0.55,
+def _dewarp_text_area_legacy(crop, smooth=(60, 30), min_field_lines=4, span_frac=0.55,
                      max_disp_lh=1.0, min_deskew=0.3, max_deskew=3.0):
     """Straighten one text area with a deliberately conservative policy:
 
@@ -332,4 +362,267 @@ def dewarp_text_area(crop, smooth=(60, 30), min_field_lines=4, span_frac=0.55,
     after = _flatness(tracks2, N2)
     if before > 1.0 and after < 0.9 * before:
         return cand, mag, mode
+    return crop, 0.0, 'none'
+
+
+# -- banded (every-N-lines) local dewarp -----------------------------------------
+# Rationale: one smoothed field over a whole column, pinned to 0 at the crop's top
+# and bottom, under-corrects -- residual baseline bow ~10 px survives, worst at the
+# top and bottom lines (exactly where page/gutter curl is strongest). Instead we
+# treat the column in small groups of `band` consecutive baselines: each group is
+# flattened to ITS OWN local baselines (so tilt AND curl are followed piecewise, not
+# averaged away), groups are blended with a vertical feather so there is no seam, and
+# the whole thing is kept only if it measurably flattens the block (never worse).
+
+def _baseline_curves(xs, tracks, min_span_bands=5, poly_deg=2, min_sep=0.0):
+    """One smooth curve y(x) per REAL text line (flat-extrapolated outside its tracked
+    x-span), with a robust residual-rejection pass so a stray peak can't tilt a line.
+    Fragment tracks are rejected (span < min_span_bands) and near-duplicate baselines
+    within `min_sep` px (two fragments of one line) are merged to the longer-tracked
+    one, so grouping every N lines really means N *lines*. Returns list top->bottom."""
+    cand = []
+    for tr in tracks:
+        if len(tr) < min_span_bands:
+            continue
+        X = np.array([xs[b] for b, _ in tr], float)
+        Y = np.array([y for _, y in tr], float)
+        o = np.argsort(X); X, Y = X[o], Y[o]
+        deg = poly_deg if (X.max() - X.min() > 1 and len(X) >= poly_deg + 2) else 1
+        p = np.polyfit(X, Y, deg)
+        r = Y - np.polyval(p, X); s = float(np.std(r)) + 1e-6
+        keep = np.abs(r) < 2.5 * s
+        if keep.sum() >= deg + 2:
+            p = np.polyfit(X[keep], Y[keep], deg)
+        cand.append({'xr': (float(X.min()), float(X.max())), 'poly': p,
+                     'target': float(np.median(Y)), 'ymid': float(np.median(Y)),
+                     'span': len(tr)})
+    cand.sort(key=lambda c: c['ymid'])
+    if min_sep > 0:                       # merge fragments of the same physical line
+        merged = []
+        for c in cand:
+            if merged and c['ymid'] - merged[-1]['ymid'] < min_sep:
+                if c['span'] > merged[-1]['span']:
+                    merged[-1] = c       # keep the longer-tracked fragment
+            else:
+                merged.append(c)
+        cand = merged
+    return cand
+
+
+def _curve_y(c, xq):
+    x0, x1 = c['xr']
+    return np.polyval(c['poly'], np.clip(xq, x0, x1))   # flat outside tracked span
+
+
+def _group_indices(m, band):
+    """Consecutive groups of `band`; a trailing remainder smaller than `band` is
+    absorbed into the previous group (never an orphan sliver)."""
+    groups, i = [], 0
+    while i < m:
+        if 0 < m - (i + band) < band:      # remainder too small -> take the rest now
+            groups.append(list(range(i, m))); break
+        groups.append(list(range(i, min(i + band, m)))); i += band
+    return groups
+
+
+def _band_weight(rows, top, bot, feather):
+    """Trapezoid: 1 inside [top,bot], linear ramp to 0 across `feather` on each side."""
+    w = np.ones_like(rows, np.float32)
+    up = rows < top;  w[up] = np.clip(1.0 - (top - rows[up]) / feather, 0, 1)
+    dn = rows > bot;  w[dn] = np.clip(1.0 - (rows[dn] - bot) / feather, 0, 1)
+    return w
+
+
+def _line_shape_and_stats(xs, tracks, N, W, min_span_frac=0.4):
+    """Clean per-line baselines (one per line), each as (X, Y, median_y, tilt_deg,
+    jitter_px). tilt = deg-1 slope; jitter = max deviation from that line's own straight
+    fit (the high-freq peak-finder noise we must NOT chase). Sorted top->bottom."""
+    need = max(6, N // 2)
+    out = []
+    for tr in tracks:
+        if len(tr) < need:
+            continue
+        X = np.array([xs[i] for i, _ in tr], float)
+        Y = np.array([y for _, y in tr], float)
+        if X.max() - X.min() < min_span_frac * W:
+            continue
+        o = np.argsort(X); X, Y = X[o], Y[o]
+        p = np.polyfit(X, Y, 1)
+        tilt = float(np.degrees(np.arctan(p[0])))
+        jit = float(np.max(np.abs(Y - np.polyval(p, X))))
+        out.append([X, Y, float(np.median(Y)), tilt, jit])
+    out.sort(key=lambda r: r[2])
+    return out
+
+
+def _curl_metric(lines):
+    """Low-frequency curl of a column: spread of per-line tilt after 3-line smoothing
+    (removes jitter, keeps the top/bottom bow). Returns (curl_std_deg, mean_jitter_px)."""
+    if len(lines) < 3:
+        return 0.0, 0.0
+    tilts = np.array([r[3] for r in lines])
+    k = 3
+    sm = np.convolve(tilts, np.ones(k) / k, mode='valid')
+    return float(np.std(sm)), float(np.mean([r[4] for r in lines]))
+
+
+def dewarp_text_area_banded(crop, band=3, max_disp_lh=1.2, max_band_deg=2.5,
+                            min_baselines=4):
+    """Remove the LOW-FREQUENCY curl of a text column using a SLIDING window of `band`
+    (=3) consecutive lines: each line's correction is the single shared trend g(x) fit
+    to itself + its neighbours (pooled, de-medianed) -- so per-line peak-finder jitter
+    cancels (3 lines agree on the real local tilt/bow) while EVERY line still gets its
+    own control profile, keeping the field's vertical resolution fine. The field is NOT
+    pinned to zero at the crop's top/bottom (that was what left residual bow on the first
+    and last lines) -- it flat-extrapolates, so the extreme lines are fully corrected.
+    Line spacing is preserved (each line keeps its own median). Kept only if the curl
+    metric drops WITHOUT adding jitter (never warps text to noise). Falls back to the
+    legacy field/deskew for sparse blocks. Returns (result, max_disp_px, mode)."""
+    H, W = crop.shape[:2]
+    xs, tracks, N = _track_baselines(crop)
+    lines = _line_shape_and_stats(xs, tracks, N, W)
+    m = len(lines)
+    if m < max(3, min_baselines):
+        return _dewarp_text_area_legacy(crop)
+
+    mids = np.array([r[2] for r in lines], float)
+    # Refuse a block that is NOT a clean single column: if the typical tracked line
+    # spans well under the block width, the block is multi-column (find_blocks can merge
+    # side-by-side columns) or ragged. Warping across a gutter pools baselines from
+    # different columns into one 'band' and corrupts them -- leave it for the per-column
+    # blocks that find_blocks also emits. (Genuine tilt on such a block is still caught
+    # by the sign-robust deskew in the entry wrapper.)
+    widths = np.array([r[0].max() - r[0].min() for r in lines], float)
+    if float(np.median(widths)) < 0.62 * W:
+        return crop, 0.0, 'none'
+    lh = max(8.0, float(np.median(np.diff(mids))))
+    clamp = min(max(6.0, max_disp_lh * lh), 24.0)   # absolute cap: real text curl/tilt is small
+    half = band // 2
+    xq = np.linspace(0, W - 1, min(W, 140))
+
+    def shared_trend(i):
+        """Shared -g(x) for the window centred on line i (jitter-cancelled)."""
+        lo, hi = max(0, i - half), min(m, i + half + 1)
+        idxs = list(range(lo, hi))
+        # only pool neighbours that are actually adjacent (no paragraph gap jump)
+        idxs = [j for j in idxs if abs(mids[j] - mids[i]) <= 1.8 * lh * band]
+        Xp = np.concatenate([lines[j][0] for j in idxs])
+        Yp = np.concatenate([lines[j][1] - lines[j][2] for j in idxs])
+        if len(Xp) < 4 or Xp.max() - Xp.min() < 1:
+            return np.zeros_like(xq)
+        p1 = np.polyfit(Xp, Yp, 1); r1 = np.std(Yp - np.polyval(p1, Xp))
+        p = p1
+        if len(Xp) >= 6:
+            p2 = np.polyfit(Xp, Yp, 2); r2 = np.std(Yp - np.polyval(p2, Xp))
+            if r2 < 0.8 * r1:
+                p = p2
+        g = np.polyval(p, xq)
+        ang = np.degrees(np.arctan((g[-1] - g[0]) / max(1.0, xq[-1] - xq[0])))
+        if abs(ang) > max_band_deg:
+            g = g * (max_band_deg / abs(ang))
+        return np.clip(-g, -clamp, clamp)
+
+    prof = np.vstack([shared_trend(i) for i in range(m)])       # (m, len(xq))
+    ext = np.concatenate(([-1e9], mids, [1e9]))                 # flat-extrapolate edges
+    rows = np.arange(H)
+    coarse = np.empty((H, len(xq)), np.float32)
+    for j in range(len(xq)):
+        col = np.concatenate(([prof[0, j]], prof[:, j], [prof[-1, j]]))
+        coarse[:, j] = np.interp(rows, ext, col)
+    D = coarse[:, np.linspace(0, len(xq) - 1, W).astype(int)]
+    D = gaussian_filter(D, (max(3.0, lh * 0.15), max(6.0, W / 50.0)))
+    D = np.clip(D, -clamp, clamp).astype(np.float32)
+
+    gx, gy = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32))
+    cand = cv2.remap(crop, gx, (gy - D).astype(np.float32),
+                     interpolation=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+
+    c0, j0 = _curl_metric(lines)
+    t0 = abs(_baseline_tilt_deg(tracks, xs))
+    xs2, tr2, N2 = _track_baselines(cand)
+    c1, j1 = _curl_metric(_line_shape_and_stats(xs2, tr2, N2, W))
+    t1 = abs(_baseline_tilt_deg(tr2, xs2))
+    # keep only if curl dropped, jitter did not rise, AND the block's own tilt did not
+    # grow (a short block at a page extreme can be handed a spurious shared trend that
+    # curls flatter but tilts more -- reject that outright: never worse).
+    if (c0 > 0.12 and c1 < 0.85 * c0 and j1 <= 1.06 * max(j0, 1e-6)
+            and t1 <= t0 + 0.15):
+        return cand, float(np.abs(D).max()), 'banded'
+    return crop, 0.0, 'none'
+
+
+
+def _consistent_tilt(crop):
+    """Median tilt (deg) of reliable, wide-spanning baselines, plus whether they AGREE.
+    Returns (median_tilt, n_lines, consistent). A real page skew makes most baselines
+    tilt the same way by a similar amount; a spurious estimate (short fragment of a
+    merged multi-column region, padding bleed) has mixed signs / big spread -> not
+    consistent -> not deskewed. This is what separates a genuinely-skewed copyright
+    panel from an unreliable 6-line fragment."""
+    xs, tracks, N = _track_baselines(crop)
+    H, W = crop.shape[:2]
+    tl = []
+    for tr in tracks:
+        if len(tr) < max(3, N // 4):
+            continue
+        X = np.array([xs[i] for i, _ in tr], float)
+        Y = np.array([y for _, y in tr], float)
+        if X.max() - X.min() < 0.35 * W:
+            continue
+        tl.append(np.degrees(np.arctan(np.polyfit(X, Y, 1)[0])))
+    if len(tl) < 3:
+        return 0.0, len(tl), False
+    tl = np.array(tl); med = float(np.median(tl))
+    same = float(np.mean(np.sign(tl) == np.sign(med)))
+    mad = float(np.median(np.abs(tl - med)))
+    ok = same >= 0.70 and mad <= max(0.35, 0.6 * abs(med))
+    return med, len(tl), ok
+
+
+def _robust_deskew(crop, min_deg=0.3, max_deg=4.0):
+    """Single-angle deskew for a sparse but CONSISTENTLY-skewed block (e.g. a
+    copyright/credits panel). The consistency test up front (baselines agree on sign and
+    magnitude) is the guarantee: rotating by their median tilt then flattens them
+    (per-line residual = tilt - median, whose median is 0). No post-rotation re-track --
+    that measurement is unreliable on short blocks and was the source of wrong-sign
+    over-rotations. If the block's baselines disagree (a merged multi-column region or
+    padding bleed), it is left untouched. Returns (result, disp_px, applied)."""
+    H, W = crop.shape[:2]
+    med, n, ok = _consistent_tilt(crop)
+    if not ok or abs(med) < min_deg or abs(med) > max_deg:
+        return crop, 0.0, False
+    M = cv2.getRotationMatrix2D((W / 2.0, H / 2.0), med, 1.0)
+    out = cv2.warpAffine(crop, M, (W, H), flags=cv2.INTER_CUBIC,
+                         borderMode=cv2.BORDER_REPLICATE)
+    return out, float(abs(np.sin(np.radians(med))) * W / 2.0), True
+
+
+def _single_column_ok(crop):
+    """False only if the block is clearly MULTI-COLUMN: enough lines to judge, each
+    spanning well under the block width (side-by-side columns that find_blocks merged).
+    Warping or deskewing such a block as one corrupts it (baselines from different
+    columns pooled together, a single rotation applied across a gutter). Few-line blocks
+    always pass -- they are judged by the deskew's own consistency test."""
+    xs, tracks, N = _track_baselines(crop)
+    W = crop.shape[1]
+    ws = [max(xs[i] for i, _ in tr) - min(xs[i] for i, _ in tr)
+          for tr in tracks if len(tr) >= max(3, N // 4)]
+    if len(ws) < 6:
+        return True
+    return float(np.median(ws)) / W >= 0.60
+
+
+def dewarp_text_area(crop, band=3, **kw):
+    """Entry point used by text_blocks.dewarp_text_areas. Multi-column blocks are left
+    untouched (the per-column blocks find_blocks also emits are handled on their own);
+    otherwise the banded low-freq curl corrector runs, and if it declines (sparse block)
+    a consistency-gated deskew catches a clear tilt. `band` = lines/band (default 3)."""
+    if not _single_column_ok(crop):
+        return crop, 0.0, 'none'
+    res, mag, mode = dewarp_text_area_banded(crop, band=band)
+    if mode != 'none':
+        return res, mag, mode
+    d, disp, ok = _robust_deskew(crop)
+    if ok:
+        return d, disp, 'deskew'
     return crop, 0.0, 'none'
