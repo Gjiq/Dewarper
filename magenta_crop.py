@@ -258,7 +258,7 @@ def is_full_page_frame(markup, margin_frac=0.06, area_frac=0.55):
     return area > area_frac and max(mL, mR, mT, mB) < margin_frac
 
 
-def magenta_quads(markup, max_quads=5):
+def magenta_quads(markup, max_quads=64):
     """4-corner quads (TL,TR,BR,BL) for each closed magenta loop -- the user's 'skew
     boxes'. Up to max_quads, largest first, returned in page order (top-to-bottom)."""
     mask = magenta_mask(markup)

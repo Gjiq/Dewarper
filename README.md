@@ -131,14 +131,16 @@ pins used for the *Spectrum* art-annual runs are in `presets/spectrum_overrides.
 
 ### Marking up a page (draw the guides)
 
-Select a page and click **✎ Mark up…** to open the editor over it.
+Select a page and click **✎ Mark up…** to open the editor. One thickness box (5–25 px) applies to whatever tool is active:
 
-- **+ Rectangle** adds a magenta rectangle with four draggable corners (up to 5). Drag the corners over an artwork or a text block; a box over art is dewarped, a box over text is deskewed (decided by content). Each box has a red **✕** to delete it.
-- **Pen** draws freehand magenta lines — along the text rows these are warp guides that straighten a bowed column.
-- **Eraser** removes pen lines you drag over.
-- **Fill** flood-fills the area enclosed by pen lines (does nothing if the lines don't close a shape); a black **✕** appears in the fill to delete it.
+- **Box** — drag to make a magenta rectangle with four draggable corners (as many as you like). Over art it's dewarped; over text it's deskewed (decided by content).
+- **Line** — a single straight magenta line.
+- **Pen** — freehand line; along the text rows these are warp guides that straighten a bowed column.
+- **Bow** — click two spots on a straight **Line** to drop anchors, then drag between them to bend it into a curve (apex at where you start dragging, so it can be left- or right-heavy) — handy for tracing a bowed row of text.
+- **Eraser** — drag over a line or a box to delete it.
+- **Fill** — click inside a box, or inside an area closed by lines, to fill it solid; a black ✕ in the fill deletes it. (Lines needn't meet perfectly — the engine groups open edges into regions.)
 
-On **Apply** the marks are composited onto a full-resolution, pixel-aligned copy of the original and written as `<page>_mag.jpg` beside it; the next **Reconstruct** pairs it and rebuilds from the clean pixels (markup supplies geometry only). Marked pages show a ✎. Opening Mark up again starts fresh and deletes the previous magenta version. Up to 5 boxes per page, each processed independently.
+On **Apply** the marks are composited onto a full-resolution copy and saved as `<page>_guide.jpg` next to the original (with a small `_guide.json` of the editable strokes). The next **Reconstruct** pairs it and rebuilds from the clean pixels. Marked pages show a ✎; opening Mark up again **re-opens** that guide so you can adjust it (it no longer resets).
 
 ### Magenta-markup override (manual guides)
 Draw magenta guides on a **pixel-aligned copy** of a scan (name it `<page>_mag.jpg`)

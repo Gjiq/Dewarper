@@ -45,7 +45,7 @@ _IMG_EXT = (".jpg", ".jpeg")
 
 def list_pages(folder):
     """Sorted list of page image basenames in a folder. Excludes magenta markup
-    sidecars (<stem>_mag.jpg / _magenta.jpg) — they pair with their original at run
+    sidecars (<stem>_guide.jpg etc.) — they pair with their original at run
     time but are not themselves pages to process."""
     try:
         names = os.listdir(folder)
@@ -56,7 +56,7 @@ def list_pages(folder):
         if not n.lower().endswith(_IMG_EXT):
             continue
         stem = os.path.splitext(n)[0].lower()
-        if stem.endswith("_mag") or stem.endswith("_magenta"):
+        if stem.endswith("_mag") or stem.endswith("_magenta") or stem.endswith("_guide"):
             continue
         out.append(n)
     return sorted(out)
@@ -301,8 +301,8 @@ def run_gui():
         pages = list_pages(folder)
         for name in pages:
             stem = os.path.splitext(name)[0]
-            has_mag = os.path.isfile(os.path.join(folder, stem + "_mag.jpg")) or \
-                os.path.isfile(os.path.join(folder, stem + "_magenta.jpg"))
+            has_mag = os.path.isfile(os.path.join(folder, stem + "_guide.jpg")) or \
+                os.path.isfile(os.path.join(folder, stem + "_mag.jpg"))
             label = ("✎ " + name) if has_mag else name
             tree.insert("", "end", iid=name, text=label, values=("Auto", ""))
         status.configure(text=f"{len(pages)} page(s) found. "
@@ -498,11 +498,7 @@ def run_gui():
             return
         name = sel[0]
         path = os.path.join(state["input"].get(), name)
-        # Re-marking resets: the old magenta version is deleted on open, so clear the
-        # ✎ now; it comes back only if the user hits Apply.
-        if tree.item(name, "text").startswith("\u270e"):
-            tree.item(name, text=name)
-            update_highlights()
+        # Re-marking a page re-opens its existing _guide for editing (does not reset).
         try:
             import dewarp_markup
             dewarp_markup.open_markup(root, path, on_saved=mark_row_done)

@@ -861,7 +861,7 @@ def _normstem(fname):
     # case-insensitive; ordinary page names ("..._Image_0001") are left untouched.
     s = fname[:-4] if fname.lower().endswith('.jpg') else fname
     pat = re.compile(
-        r'(__\d+_?|_\(\d+\)|_orig(?:inal)?|_clean|_mag(?:enta)?'
+        r'(__\d+_?|_\(\d+\)|_orig(?:inal)?|_clean|_mag(?:enta)?|_guide'
         r'|[ _]-[ _]?[Cc]opy(?:[ _]?\(\d+\))?'      # "name - Copy", "name_-_Copy (2)"
         r'|[ _][Cc]opy(?:[ _]?\d+)?)$',              # macOS "name copy", "name copy 2"
         flags=re.IGNORECASE)

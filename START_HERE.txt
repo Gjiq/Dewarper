@@ -1,4 +1,4 @@
-DEWARP PIPELINE — v88
+DEWARP PIPELINE — v91
 ====================
 (Scanned art-plate reconstruction.)
 Deskews, crops and whitens scanned art-annual pages so each printed artwork is
@@ -11,7 +11,7 @@ folder into a session to run.
   This build is v71, so the next handover is v72, then v73, and so on — never reuse a
   number, never drop the name. After bumping it, update the "DEWARP PIPELINE — v<N>"
   line at the top of this file to match, so the version always travels with the code.
-  This build is v88; the next handover is v89.
+  This build is v91; the next handover is v92.
 
 >>> READ FIRST — THIS IS AN IMAGE PIPELINE <<<
   The deliverable is RENDERED JPEG FILES, never text. When the user posts page
@@ -34,6 +34,38 @@ folder into a session to run.
   Deps already expected: opencv-python (cv2), numpy, scipy.
 
 IMPROVEMENTS BAKED IN (this build — keep all of them)
+  - NEW v91 — BOW TOOL. New markup radio 'Bow': click a straight Line twice to drop two
+    anchor circles on it, then drag between them to bend that span into a quadratic-Bezier
+    curve. The curve passes through the cursor at parameter t0 = projection of the
+    drag-START onto the anchor span (t0 clamped 0.1-0.9), so the apex is left/right-heavy
+    by where you begin and up/down/sideways by where you drag. Control point solved as
+    C=(D-(1-t0)^2*a1-t0^2*a2)/(2(1-t0)t0). On commit the Line becomes a smooth polyline
+    (kind 'pen' -> exports as freeline = a magenta warp guide); anchors clear. Helpers
+    _seg_t + _quad_bezier (module-level, pure). Verified: apex passes through D at t0;
+    driven gesture line(2 pts)->2 anchors->curve(25 pts), circles cleared.
+  - NEW v90 — MARKUP EDITOR REBUILD #2 + _guide workflow. Tools are radios Box/Line/Pen/
+    Eraser/Fill with ONE shared thickness spinbox (5-25 px, step 5, unlabelled) applied to
+    the active tool; preview width now reflects it (thick*scale). Box: drag-create, 4
+    draggable corners, NO per-box x, UNLIMITED count (editor cap removed; magenta_quads
+    max_quads 5->64). Line: single straight line. Pen: freehand. Eraser: deletes lines AND
+    boxes (and fills) under the cursor (radius ~ thickness; _pt_in_poly for box interior).
+    Fill: floods inside a BOX or any loop of straight/pen lines (walls = lines + closed
+    rects); black x deletes. Layout is resize-proof (toolbar + action buttons packed top,
+    canvas fills, status bottom). The 'needs a closed region' warning was removed (engine
+    groups open edges via magenta_text.magenta_regions).
+    FILES: save_markup writes <stem>_guide.jpg AND <stem>_guide.json (editable strokes);
+    reconstruct._normstem now strips _guide so it pairs; GUI list_pages hides _guide and
+    populate flags it with the pencil. Re-opening Mark up LOADS _guide.json (does not
+    reset). Verified: reopen recreates 2 boxes+1 line+1 fill; fill-in-box & fill-in-
+    straight-loop return regions; 7 boxes -> 7 quads.
+  - NEW v89 — BUILD PACKAGING FIX. build.yml now packages each OS's CLI+GUI pair into one
+    clearly-named zip (Dewarp-windows.zip / Dewarp-linux.zip / Dewarp-macos.zip) and
+    attaches those to the release. Fixes the collision where the linux and macOS builds
+    both produced files literally named 'dewarp'/'dewarp-gui' (no extension) and
+    overwrote each other when flattened onto one release. Keeping the CLI+GUI together in
+    the zip preserves the sibling-exe call (GUI runs dewarp.exe next to it). Matrix uses
+    include: with a per-OS 'label'. NOTE for users: the GUI is dewarp-gui[.exe]; plain
+    dewarp[.exe] is the console tool (its double-click prompt is expected).
   - NEW v88 — ICON REVERSED + MULTI-SIZE. icon.png is now the colour-reversed logo
     (black sun/waves on ORANGE, the figure-ground swap of the original orange-on-black),
     512x512. Added icon.ico (16-256 multi-size, Windows) and icon.icns (macOS). build.yml
