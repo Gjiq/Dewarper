@@ -3,10 +3,17 @@
 ================================================================
 
 WHAT IT DOES
-  Cleans up scanned art-annual pages: straightens each artwork,
-  crops it, whitens the paper (or keeps the black background on
-  dark pages), and leaves the page text in place. It writes one
+  Cleans up scanned pages (books, comics, art annuals, magazines):
+  straightens each image, crops it, whitens the paper (or keeps the
+  black background on dark pages), splits pages that hold several
+  pictures, and leaves the page text in place. It writes one
   finished JPEG per page.
+
+  Depending on what a page is, its output file is named:
+     <page>_reconstructed.jpg   an artwork page
+     <page>_text.jpg            a text / credits page
+     <page>_skipped.jpg         a blank leaf or a page it skipped
+  (so every page you put in has a matching file out).
 
 ----------------------------------------------------------------
 RUNNING IT  (pick whichever is easiest)
@@ -46,11 +53,37 @@ WHAT GOES IN THE FOLDER
 ----------------------------------------------------------------
 GOOD TO KNOW
 ----------------------------------------------------------------
+  * In the page list you can drag to select a range and
+    right-click to set Page type, Rotate (for sideways scans),
+    or turn De-curl off on all the selected pages at once.
   * Ordinary clean pages are handled automatically.
   * Tricky pages (mixed media, heavy curl, vivid full-bleed art)
     are driven by your magenta markup and are worth a quick look
     afterwards — automatic handling can occasionally misjudge a
     page. Always eyeball the output.
+  * To guide a hard page by hand, select it and click "Mark up".
+    Tools: Skew Box (a rectangle with 4 draggable corners — drag
+    them onto a tilted artwork and it is straightened; up to 5 per
+    page), Free Line (freehand, for warped/bowed areas), and Fill
+    (click inside a closed loop of Free Lines to mark that area).
+    Save writes <page>_mag.jpg beside the original; it's used
+    automatically next Reconstruct (rebuilt from the clean scan —
+    the drawing only supplies the shape).
+  * If a page comes out wrong — most often a vivid full-page image
+    that got treated as blank and skipped — you can force its type.
+    Make a text file named  dewarp_overrides.txt  in your input
+    folder with one line per page, e.g.:
+        my_cover.jpg = FULL_BLEED
+        blank.jpg    = SKIP
+    Types: FULL_BLEED, FULL_ART, MULTI_ART, DARK_BG, TEXT,
+    SIDE_TEXT, SKIP.  FULL_ART = force one whole-page artwork;
+    MULTI_ART = force splitting into several artworks; SIDE_TEXT =
+    a text column beside the art (either side). Most pages
+    need no entry. (See the README for the full details.)
+  * Bigger, sharper files: outputs keep full resolution but are
+    saved as JPEGs (default quality 95, so smaller than the scan).
+    For files close to the original size, run with  --quality 100
+    (or pick Maximum in the app's Output quality box).
   * Your original scans are never modified or overwritten. Folder
     and multi-file drops write results to a separate output folder;
     a single dropped file gets one clearly-named _reconstructed.jpg

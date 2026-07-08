@@ -45,7 +45,7 @@ def build_paper_profile(paths, scale=0.34):
     v36 -- ONLY PAGES WITH A REAL PAPER MARGIN DEFINE THE ENVELOPE. The earlier
     builder sampled the border ring of EVERY page as "paper". On a FULL-BLEED
     painting the border ring IS art, so those pages injected art saturation/darkness
-    into the envelope and blew it up (Spectrum 8: s_max 211 / dv 70), after which the
+    into the envelope and blew it up (one very dark scan hit s_max 211 / dv 70), after which the
     art/paper test flagged only near-neon or very dark pixels as art and every muted /
     desaturated / dark painting was mis-read as paper. Now each page is sampled only
     from its bright, low-saturation PAPER-LIKE ring pixels, and a page whose ring is
@@ -225,7 +225,7 @@ def _art_component(orig, bg, scale=0.34):
     # can sit at or above the paper white-point with low saturation, so the value/sat test
     # above misses it -- yet, unlike smooth paper, it carries fine detail. Without this the
     # art bounding box stops short of the light art (typically along the page BOTTOM) and that
-    # art is later whitened / wiped to paper (Spectrum 11 p061/063/065/078/083-089...). Add
+    # art is later whitened / wiped to paper (seen on heavily-inked art pages). Add
     # medium-scale edge-dense regions; smooth paper reads ~0 and page text is removed next.
     _edges = cv2.Canny(g, 40, 120)
     _dens = cv2.blur((_edges > 0).astype(np.float32), (23, 23))
@@ -248,7 +248,7 @@ def _art_component(orig, bg, scale=0.34):
         # drop the art mask below threshold, splitting a strip (usually the TOP) into its
         # own component. Taking only the largest component dropped that strip -> it was
         # never cropped or erased and survived as a separate, slightly-wider rectangle on
-        # the page (Spectrum 2 p016-019/028/029/036/039/042/082-085/095-099/118/124-127).
+        # the page (seen across a run of text-heavy pages).
         # A component is merged in when it OVERLAPS the current art region on one axis and
         # is only a small gap away on the other AND the connecting strip actually holds
         # art (mean>0.18) -- so a real plate is reunited but a paper-separated neighbour
@@ -678,13 +678,20 @@ def close_triangles(crop, lo=0.012, hi=0.060, min_fill=0.86, min_span=0.88):
 REDEWARP = True
 
 
-def deskew_deep_crop(orig, bg, margin_frac=0.015):
+# Inward crop inset ('inline crop'). Default 0.015 = crop a hair INTO the art for a
+# crisp edge; reconstruct sets this per page (0 = keep the full detected art extent).
+CROP_MARGIN_FRAC = 0.015
+
+
+def deskew_deep_crop(orig, bg, margin_frac=None):
     """Return (crop_bgr, (pcx,pcy), theta_deg, comp_mask). Deskewed + inset.
 
     Two-pass: pass 1 deskews by the reliable border angle; pass 2 measures any
     residual tilt left on the cropped art (from its strong-colour edge) and, if
     real, re-deskews the original by (theta1 + residual) -- removing the triangular
     page-vs-art wedge that a small under-rotation leaves along a straight edge."""
+    if margin_frac is None:
+        margin_frac = CROP_MARGIN_FRAC
     H, W = orig.shape[:2]
     comp = _art_component(orig, bg)
     ys, xs = np.where(comp > 0)
@@ -1127,7 +1134,7 @@ def _despeckle_paper(out):
 def _wipe_soft_bands(whp, keep, tmask, fill_img, pwl):
     """v47: remove the faint SCAN-SHADOW / under-whitened GREY BAND that can survive in a
     page MARGIN outside the placed art -- the "separate, slightly-wider strip at the top"
-    users flagged as 'choppy' on Spectrum 2 p016-019/028/029/036/039/042/082-085/095-099/
+    users flagged as 'choppy' on text-heavy pages
     118/124-127. It is NOT split art (the plate IS detected and placed correctly -- verified
     p018: art top y=401, the strip is a scan-shadow band at y~90-240 in the top MARGIN) and
     NOT a component in the art mask -- it is a soft grey band the flatfield leaves a few
@@ -1177,7 +1184,7 @@ def _wipe_soft_bands(whp, keep, tmask, fill_img, pwl):
     # patch of LIGHT-TONED art (a pale drawing / faint wash with detail) is also low-sat and
     # soft-grey and can fall OUTSIDE the detected art crop, so without this it matched the
     # band profile and got wiped -- erasing art, worst at the page bottom where the plate
-    # detector under-reaches (Spectrum 11 p061/063/065/081/083-089...). Measure Canny-edge
+    # detector under-reaches (seen on heavily-inked art pages). Measure Canny-edge
     # density inside each candidate component's bounding box: a flat band reads ~0, light art
     # reads well above. Components with real internal structure are left intact.
     edges = cv2.Canny(cv2.cvtColor(whp, cv2.COLOR_BGR2GRAY), 40, 120)
@@ -1407,7 +1414,7 @@ def _should_merge(a, b, m, art_thresh=0.22):
         # new area; for two DIAGONALLY-placed SEPARATE plates the union ENGULFS a big
         # new paper/text corner -- and because text is subtracted from the art mask,
         # that corner reads ~0. Merging there stamped a grey text strip with doubled
-        # glyphs into the empty corner (v42: Spectrum-5 p037 entries 1-2, right-column
+        # glyphs into the empty corner (v42: a two-column index page, right-column
         # plates vs bottom-left pencil plate overlapping diagonally). Reject the merge
         # when it would swallow a meaningful NEW region that holds no art.
         ux0, uy0 = min(a[0], b[0]), min(a[1], b[1])
@@ -1510,7 +1517,7 @@ def art_pictures(orig, bg, scale=0.34, min_area=0.035, min_dim=0.11,
     # v44: a light ceiling / sky / transition band can split the TOP (or a side) of a
     # plate into a SUB-GATE component (too short/weak to be its own picture) that used to
     # be dropped -> never cropped or erased -> a separate, slightly-wider leftover strip
-    # (Spectrum 2 p042 etc.). Absorb such a strip into its plate, but SAFELY: an extra is
+    # (seen on some pages). Absorb such a strip into its plate, but SAFELY: an extra is
     # merged ONLY if it connects (art in the gap) to EXACTLY ONE picture. If it would
     # touch two pictures it is left out, so a stray blob can never BRIDGE two separate
     # arts into one. Isolated sub-gate blobs (vignettes/noise) are simply dropped.
@@ -1543,7 +1550,7 @@ def _split_stacked_plates(orig, boxes, min_h_frac=0.80, min_gutter_frac=0.011):
     the paper gap between two plates in one column into a single tall component. Left
     merged, that box takes the TOP plate's full width and runs it all the way down the
     page, so it is composited on top of the neighbour below it (the 'grossly enlarged
-    art dropped on the neighbour' on Spectrum 11 p59/93/105/109). Find the bright paper
+    art dropped on the neighbour' on stacked-plate pages). Find the bright paper
     band spanning the box interior and cut the box into its two real plates."""
     H, W = orig.shape[:2]
     g = cv2.cvtColor(orig, cv2.COLOR_BGR2GRAY)
@@ -1666,7 +1673,7 @@ def compose_multi(orig, bg, flatfield_whiten, boxes, clip_boxes=False, center_co
     its padded sub-crop) to page background BEFORE deskew_deep_crop, so the art-edge
     detection / deskew / keystone-close see ONLY this picture's art. Without this,
     the 8% outward pad can reach into an adjacent picture, and the corner-fit warp
-    then pulls in / stretches the neighbour (seen on Spectrum-3 p046: the top-right
+    then pulls in / stretches the neighbour (seen on one two-plate page: the top-right
     plate's pad overlapped the left plate -> the whole plate was keystone-stretched).
     For auto-detected boxes (art_pictures) leave it False -- those boxes are derived
     from the art itself and the pad is wanted to capture art just outside the bbox."""
@@ -1688,7 +1695,7 @@ def compose_multi(orig, bg, flatfield_whiten, boxes, clip_boxes=False, center_co
         # so a TALL narrow box (e.g. two plates stacked in one column) got a huge
         # HORIZONTAL pad that reached sideways into the caption column; the crop then
         # overwrote the right half of every text line and pasted its grey left margin
-        # over them (Spectrum-5 p037). Per-axis pad keeps the reach proportional to each
+        # over them (a two-column index page). Per-axis pad keeps the reach proportional to each
         # side while still capturing the soft art fringe just outside the box.
         padx = int(0.08 * (x1 - x0)); pady = int(0.08 * (y1 - y0))
         cx0, cy0 = max(0, x0-padx), max(0, y0-pady)

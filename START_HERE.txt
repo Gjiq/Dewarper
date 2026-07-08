@@ -1,4 +1,4 @@
-DEWARP PIPELINE — v72
+DEWARP PIPELINE — v88
 ====================
 (Scanned art-plate reconstruction.)
 Deskews, crops and whitens scanned art-annual pages so each printed artwork is
@@ -11,7 +11,7 @@ folder into a session to run.
   This build is v71, so the next handover is v72, then v73, and so on — never reuse a
   number, never drop the name. After bumping it, update the "DEWARP PIPELINE — v<N>"
   line at the top of this file to match, so the version always travels with the code.
-  This build is v72; the next handover is v73.
+  This build is v88; the next handover is v89.
 
 >>> READ FIRST — THIS IS AN IMAGE PIPELINE <<<
   The deliverable is RENDERED JPEG FILES, never text. When the user posts page
@@ -34,6 +34,188 @@ folder into a session to run.
   Deps already expected: opencv-python (cv2), numpy, scipy.
 
 IMPROVEMENTS BAKED IN (this build — keep all of them)
+  - NEW v88 — ICON REVERSED + MULTI-SIZE. icon.png is now the colour-reversed logo
+    (black sun/waves on ORANGE, the figure-ground swap of the original orange-on-black),
+    512x512. Added icon.ico (16-256 multi-size, Windows) and icon.icns (macOS). build.yml
+    now pip-installs pillow so PyInstaller's --icon icon.png conversion works on all three
+    OSes. A photometric-invert alternative (blue-on-white) was delivered separately as
+    icon_alt_invert.png in case that reading of 'reverse' was intended.
+  - NEW v87 — MARKUP EDITOR REBUILD (dewarp_markup.open_markup rewritten; pure helpers
+    render_markup/enclosed_region/save_markup unchanged). Tools: a '+ Rectangle' BUTTON
+    adds a magenta quad with 4 draggable corners (up to MAX_QUADS=5), each with a red
+    \u2715 delete at its centroid; Pen (freehand warp/art lines); Eraser (drag over a pen
+    line to delete that whole stroke); Fill (bucket via enclosed_region; on success a
+    black \u2715 delete appears at the seed). Press-order hit test: rect-\u2715 -> fill-\u2715
+    -> corner-drag -> tool action, so corners/deletes work under any tool. collect_strokes
+    exports rects->skewbox, lines->freeline, fills->fill (unchanged downstream). Verified
+    by driving the button (3x add -> 3 outlines + 12 handles + 3 red \u2715; magenta+red
+    pixels present) and re-running the pure-helper tests.
+  - NEW v86 — SAVE / LOAD PROJECT. Two buttons on the quality row write/read a .dewarp
+    JSON file: {dewarp_project, input, output, quality(int), cached_profile, pages}. `pages`
+    is exactly the rich overrides format (verified: a project's pages load cleanly through
+    reconstruct.load_page_overrides), gathered by a shared gather_overrides() now used by
+    both Reconstruct and Save. Load restores folders/quality/cached, repopulates the list,
+    and re-applies each page's type + decurl/inline_crop/rotate; markup _mag.jpg files are
+    restored automatically since they live in the input folder. Load warns if the saved
+    input folder is missing or a saved page isn't in the current folder.
+  - NEW v85 — MARKUP APPLY/RESET + APP ICON. 'Save markup' button renamed 'Apply'.
+    open_markup deletes any existing <stem>_mag/_magenta.jpg on open (re-marking starts
+    fresh; the old magenta version is removed from the input/queue). GUI clears the row's
+    marker on open, re-adds it only on Apply. App icon (icon.png) set on the main + markup
+    windows via iconphoto, bundled in build.yml (--add-data/--icon, path via _MEIPASS when
+    frozen). Confirmed working WITHOUT change: the pipeline handles MULTIPLE magenta
+    rectangles (magenta_boxes/quads/regions each return every box), and per-box ART-vs-TEXT
+    routing is automatic via magenta_text.region_is_text (box over a painting -> art dewarp;
+    box over a text column -> correct_text_block flattens it to its warp guides). Text warp
+    guides = a stack of magenta horizontals along the text rows (open-box sides allowed);
+    the Free Line tool draws them.
+  - NEW v84 — TOOLBAR: Auto + Dark BG buttons restored; De-curl + Inline crop toggles.
+    * Type buttons now Auto / Full Art / Multi Art / Dark BG / Text / Side Text (one
+      shared TYPE_BUTTONS list drives BOTH the buttons and the right-click Page-type
+      submenu, so menu == buttons). No-curl renamed De-curl; toggles now read blue when
+      ON (their default), matching Auto reading blue at the default type -- update_highlights
+      shows current state, not just overrides.
+    * NEW per-image 'inline crop' setting (default on) = the deliberate inward inset.
+      deskew_crop.CROP_MARGIN_FRAC (default 0.015) is now a module global that
+      deskew_deep_crop reads; reconstruct sets it 0.0 per page when inline_crop is off
+      (keeps the full detected art extent). Verified: crop 2723x3269 (on) vs 2805x3355
+      (off). Parsed from the rich overrides object like decurl.
+    * Right-click menu adds Inline crop On/Off and a Select all command.
+  - NEW v83 — TOOLBAR SIMPLIFIED. Type buttons reduced/reordered to FULL_ART, MULTI_ART,
+    TEXT, SIDE_TEXT (removed the Full Bleed, Dark BG, Skip and Auto BUTTONS, and all the
+    Rotate buttons + the right-click Rotate submenu). Single-row toolbar: the 4 type
+    buttons + No-curl + Mark up. Auto/Full Bleed/Dark BG/Skip and De-curl remain in the
+    right-click menu (nothing lost); rotate stays engine-supported via the overrides file
+    only. update_highlights no longer touches rotate. No engine change.
+  - NEW v82 — ALL PAGE PATHS AS TOOLBAR BUTTONS (two-row toolbar). The type button row
+    now exposes every path: Auto / Full Bleed / Full Art / Multi Art / Dark BG / Side
+    Text / Text / Skip (previously only Text/Full Art/Multi Art/Auto were buttons; the
+    rest were right-click-only and had no highlight indicator). Row 2 holds Rotate +
+    No-curl + Mark up. All buttons set the selection AND highlight blue to show its
+    current state. GUI-only change; the underlying page types were already supported.
+  - NEW v81 — 'ORIGINAL QUALITY' OUTPUT (4:4:4) + rotate/decurl indicator buttons.
+    * Root cause of 'renders look lower quality': cv2's JPEG encoder uses 4:2:0 chroma
+      subsampling even at quality 100 (half colour resolution, ~0.6x size). Fixed by a
+      module-level _JPEG_PARAMS that appends IMWRITE_JPEG_SAMPLING_FACTOR_444 whenever
+      JPEG_Q>=100, in reconstruct.py + magenta_crop.py + dewarp_text.py (all imwrite
+      sites route through _JPEG_PARAMS). Verified: same page q100 4:2:0=9.6MB vs 4:4:4
+      =15.9MB vs 15.7MB original. GUI top preset relabelled 'Original quality (full
+      colour, matches source)'. Lower presets keep default subsampling for smaller files.
+    * GUI: Rotate (⟳90/180/⟲90) and No-curl toggle buttons added to the toolbar, mirroring
+      the type buttons -- they set the selection AND highlight blue to show the selected
+      page(s)' current rotate/decurl state (clicking the active rotation clears it).
+      update_highlights() now colours type + rotate + decurl + markup buttons together.
+  - NEW v80 — TYPE BUTTONS AS STATE INDICATORS. The bulk type buttons (All Text /
+    Full Art / Multi Art / Reset->Auto) are now tk.Buttons that HIGHLIGHT BLUE (#2d6cdf,
+    white text) when they match the current selection's type, so you can see at a glance
+    what each page is set to; the Mark up button highlights when the selection has a saved
+    markup. update_highlights() runs on <<TreeviewSelect>> and after every set (bulk_set,
+    context-menu _apply, markup save). Mixed selection -> no button highlighted. Verified
+    under Xvfb (accent-blue pixels present in the button band on an Auto selection).
+  - NEW v79 — PER-IMAGE SETTINGS (rotate, de-curl) + list interaction.
+    * Overrides file is now RICH: a value may be a page-type string OR an object
+      {"type":..., "rotate":90|180|270, "decurl":false}. load_page_overrides returns
+      (types, settings); module globals PAGE_OVERRIDES + PAGE_SETTINGS. rotate applies
+      cv2.rotate right before classify_page (recomputes H,W; standalone pages only, not
+      the magenta-pair path); decurl=false gates the page_dewarp pre-pass per page.
+      Verified: rich parse; rotate swaps out dims 2823x3496->3496x2823; decurl off drops
+      the [page-decurl] pass; type+rotate+decurl compose (MULTI_ART+rot90+no-curl).
+    * GUI: page list gained an Options column; DRAG-to-select a range; RIGHT-CLICK menu
+      (Page type / Rotate / De-curl / Mark up) acting on the whole selection (or all if
+      none selected). The old click-to-open-combobox editor was removed in favour of the
+      menu; bulk buttons remain. start_run emits the rich JSON (type + non-default opts).
+  - NEW v78 — MARKUP EDITOR REDESIGN (3 tools) + PERSPECTIVE SKEW-BOX PATH.
+    * Tools are now Skew Box / Free Line / Fill (dewarp_markup.py rewritten).
+      SKEW BOX: a magenta quad with 4 DRAGGABLE corners (<=5/page); rendered as a
+      closed quad outline. FREE LINE: freehand warp/bowing guides. FILL: a bucket
+      (enclosed_region) that flood-fills the area CLOSED by free lines and no-ops if
+      the seed escapes to the border (verified: inside->region, outside/open->None).
+    * ENGINE: magenta_crop.magenta_quads() (up to 5 four-corner quads from closed
+      loops) + magenta_quad_compose(clean, markup, whiten) -> perspective-rectifies
+      each quad's content from its corners onto the whitened page. reconstruct routes
+      a paired markup to the quad path ONLY when a quad is actually skewed (>2.5deg on
+      the top/left edge); axis-aligned boxes keep the proven magenta_dewarp path.
+      Rectify verified on a synthetic skew (top-edge straightness 0.0px) and
+      end-to-end (skewed skew-box -> 'perspective-rectified'; axis-aligned -> 'dewarped').
+    * FIX: the markup-pairing gate (_is_markup) now also accepts magenta_quads()>=1 --
+      a deliberately skewed quad fails magenta_boxes' rectangular-hole gate but is a
+      valid closed loop, so without this a skewed-only markup would not pair.
+    ARG-ORDER NOTE: magenta_quad_compose is (clean, markup) -- opposite of
+    magenta_dewarp(magenta, orig). reconstruct calls it (orig_img, img).
+  - NEW v77 — IN-APP MAGENTA MARKUP EDITOR (dewarp_markup.py). Draw guides on a page and
+    export a pixel-aligned <stem>_mag.jpg the existing magenta path pairs + reconstructs
+    from the clean original. Tools: Box (rectangle outline), Line, Freehand, Fill (filled
+    region). Strokes are stored in ORIGINAL coords and composited at full resolution
+    (render_markup / save_markup are pure, unit-tested; strokes drawn on a scaled preview
+    map back via the display scale). Pen colour is BGR (145,14,245) == HSV ~163/240/245,
+    inside magenta_crop's detected band (pure 255,0,255 is OUT of band -> not detected;
+    this was verified). GUI: a '✎ Mark up…' button opens the editor for the selected page,
+    marked pages show a ✎, and list_pages hides *_mag/_magenta sidecars from the page list
+    (they still pair at run time). No run-path change -- the _mag.jpg lands in the input
+    folder and the v17 duplicate-stem pairing gate does the rest.
+  - magenta_crop.magenta_boxes() EXTENDED: besides closed loops (inner-hole boxes) it now
+    also accepts LARGE SOLID magenta regions (fill ratio > 0.55) as art boxes via their
+    bounding rect -- this is what makes the editor's Fill tool (and irregular blobs) work.
+    Thin outlines/lines have low fill ratio and are excluded, so the paint false-positive
+    guard (and the duplicate-pair gate) are unchanged. Verified: outline->inner box,
+    fill->bbox, blob->bbox, lone line->none, clean page->none.
+  - NEW v76 — FORCED ART PATHS + CONFIGURABLE OUTPUT QUALITY.
+    * Two new override values route FULL_BLEED explicitly: FULL_ART = force ONE panel
+      (union bbox of all detected pictures -> compose_fullbleed, never split);
+      MULTI_ART = force the multi composer (skips the keyline single-frame early-return
+      and places each detected picture separately). Plain FULL_BLEED still auto-decides
+      (multi when art_pictures finds >=2). Added to VALID_PAGE_TYPES; normalised to
+      page_type=FULL_BLEED + a _force_split flag at override-apply time so all later
+      page_type checks are unchanged. The GUI exposes these as bulk buttons
+      (All Text / Full Art / Multi Art / Reset) that set the selected rows (or all rows
+      if none selected), and both appear in the per-page Type dropdown.
+    * Output JPEG quality is now configurable via env DEWARP_JPEG_QUALITY (1-100,
+      default 95) / dewarp_cli --quality / the GUI 'Output quality' selector
+      (Standard 95 / High 98 / Maximum 100). All 13 imwrite sites (reconstruct x10,
+      dewarp_text x1, magenta_crop x2) read JPEG_Q. Resolution was already preserved;
+      quality is the only lever on file size (q100 ~2x the q95 size, near-original).
+  - NEW v75 — DESKTOP GUI (dewarp_gui.py). A standard-library Tkinter front-end over the
+    same engine (it shells out to dewarp_cli.py, or the sibling `dewarp` exe when frozen;
+    no behavioural change). Folder pickers; a per-page list with a Type column
+    (Auto/FULL_BLEED/DARK_BG/TEXT/SIDE_TEXT/SKIP) whose non-Auto rows are written to a
+    temp overrides JSON passed via --overrides; a preview pane; a live streamed log +
+    progress bar (parsed from per-page stdout); and post-run highlighting of SKIP pages
+    so mis-classified art is easy to spot, pin and re-run. Pure helpers (list_pages,
+    build_overrides, build_command, parse_page_line) are unit-tested; the window was
+    rendered + screenshot-checked under Xvfb. .github/workflows/build.yml gains a second
+    PyInstaller target (--windowed) producing dewarp-gui alongside dewarp on each v* tag.
+  - NEW v73 — DE-SPECTRUM / GENERALISED FOR ANY SCAN SET. The engine is unchanged;
+    what changed is that Spectrum-specific DATA and wording were pulled out of the code
+    so the tool ships as a general scanned-page cleaner:
+      * PAGE_OVERRIDES is no longer a hard-coded dict in reconstruct.py. It is loaded at
+        run time from an EXTERNAL file via load_page_overrides(INPUT_DIR): the path in
+        env DEWARP_OVERRIDES (set by  dewarp_cli --overrides FILE), else an auto-detected
+        dewarp_overrides.json / dewarp_overrides.txt in the input folder, else empty.
+        Accepts JSON ({"name.jpg":"FULL_BLEED"}) or text (name.jpg = TYPE, '#' comment).
+        Unknown types are dropped with a warning; valid = FULL_BLEED/TEXT/SIDE_TEXT/
+        DARK_BG/SKIP (TEXT_LEFT and TEXT_RIGHT accepted as aliases for SIDE_TEXT).
+        All 44 previous Spectrum pins were moved verbatim into
+        presets/spectrum_overrides.json (pass it with --overrides to reproduce old runs);
+        presets/dewarp_overrides.example.txt is a user starter template.
+      * dewarp_cli.py gained --overrides FILE; default INPUT_DIR/OUTPUT_DIR are now
+        ./pages and ./out (were the dev container paths); user-facing strings say
+        'scanned pages' not 'art-annual pages'. Two Spectrum 20 calibration comments in
+        classify_page were reworded to neutral references (thresholds unchanged).
+      * README.md / HOW_TO_USE.txt rewritten for the general tool (output-file types
+        _reconstructed/_text/_skipped documented; overrides-file + resume sections added).
+    NOTE: this changelog (START_HERE) is the internal DEV history and still refers to
+    Spectrum volumes throughout — that is intentional (it is the design/decision log).
+    The shippable code and the user docs (README, HOW_TO_USE) are the de-Spectrumed
+    surface. No behavioural change to any reconstruction path.
+  - NEW v74 — RENAMED the side-text page type TEXT_LEFT -> SIDE_TEXT. It was always
+    side-aware (detect_panels + deskew_side_text pick left OR right automatically), so
+    the 'LEFT' name was misleading -- both text-left-of-art and text-right-of-art are
+    the same SIDE_TEXT type. Canonical everywhere in code, presets and user docs;
+    TEXT_LEFT and TEXT_RIGHT are accepted as INPUT aliases (normalised on load via
+    PAGE_TYPE_ALIASES) so existing override files keep working. Functional touch-points:
+    classify_page returns SIDE_TEXT; the curl-pre-pass list uses SIDE_TEXT; SIDE_TEXT
+    pages still write _reconstructed.jpg (art group), NOT _text.jpg. No other behaviour
+    change. Older changelog/reference lines below still say TEXT_LEFT -- historical.
   - NEW v72 — SPECTRUM 17 SKIP PAGES PINNED (PAGE_OVERRIDES). Code is otherwise IDENTICAL
     to v71; the only change is five page-type overrides for the Spectrum 17 batch (pages
     001-289, run through this build). classify_page sent five real full-bleed PAINTINGS /

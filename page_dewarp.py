@@ -50,7 +50,7 @@ def _edge_samples(gray, gy, x0, x1, ey, band, resid_thr=3.5, min_found_frac=0.5)
     xcf = (xs - xs.mean()) / (np.ptp(xs) + 1e-6)
     fit = np.vander(xcf, 3) @ coef
     # Remove only CURVATURE (the bow). Each edge's slope is left in place for the
-    # per-picture deskew (which now runs on TEXT_LEFT panels too). Target = the
+    # per-picture deskew (which now runs on SIDE_TEXT panels too). Target = the
     # straight line through the fitted curve; dy bends the curve onto that line.
     lin = np.polyval(np.polyfit(xcf, fit, 1), xcf)
     dy = lin - fit

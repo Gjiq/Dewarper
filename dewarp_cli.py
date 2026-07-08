@@ -11,12 +11,17 @@ Ways to launch the compiled `dewarp` executable:
     results collect in "<folder-of-first-file>/dewarp_reconstructed".
   * Double-click the app                       -> asks you for a folder or file.
   * From a terminal:
-        dewarp ./pages                 (a folder)
-        dewarp page1.jpg page2.jpg     (loose files)
-        dewarp -i ./pages -o ./out     (explicit in/out)
+        dewarp ./pages                          (a folder)
+        dewarp page1.jpg page2.jpg              (loose files)
+        dewarp -i ./pages -o ./out             (explicit in/out)
+        dewarp -i ./pages --overrides fixes.json   (pin mis-classified pages)
 
 Magenta-marked pages supply box geometry and are reconstructed from the clean
 original -- drop the marked page and its clean original together.
+
+Page-type overrides (for the occasional page the classifier gets wrong) live in an
+external file, not in the code -- pass --overrides FILE, or drop a
+dewarp_overrides.json/.txt into the input folder. See README for the format.
 """
 import argparse
 import os
@@ -71,9 +76,9 @@ def _stage(files, folders):
 def main() -> None:
     p = argparse.ArgumentParser(
         prog="dewarp",
-        description="Reconstruct scanned art-annual pages (deskew, crop, whiten / "
-                    "keep-black, retain text). Drag a folder, a single page, or "
-                    "several pages onto the app.")
+        description="Clean up scanned pages (deskew, crop, flat-field whiten / "
+                    "keep-black, split multi-image pages, retain text). Drag a "
+                    "folder, a single page, or several pages onto the app.")
     p.add_argument("paths", nargs="*",
                    help="a folder, a page file, or several page files "
                         "(you can drag them onto the app)")
@@ -83,6 +88,14 @@ def main() -> None:
                    help="where to write results")
     p.add_argument("--cached-profile", action="store_true",
                    help="reuse a cached paper profile if present")
+    p.add_argument("--quality", type=int, metavar="1-100",
+                   help="output JPEG quality (default 95; use 100 for near-original "
+                        "file size)")
+    p.add_argument("--overrides", metavar="FILE",
+                   help="page-type overrides file (JSON or text) for pages the "
+                        "classifier gets wrong; see README. If omitted, a "
+                        "dewarp_overrides.json/.txt in the input folder is used "
+                        "automatically when present")
     args = p.parse_args()
 
     out = args.output_flag
@@ -143,6 +156,10 @@ def main() -> None:
     os.environ["DEWARP_OUTPUT"] = out
     if args.cached_profile:
         os.environ["DEWARP_CACHED_PROFILE"] = "1"
+    if args.overrides:
+        os.environ["DEWARP_OVERRIDES"] = _clean(args.overrides)
+    if args.quality:
+        os.environ["DEWARP_JPEG_QUALITY"] = str(max(1, min(100, args.quality)))
     os.environ.pop("DEWARP_IMPORT", None)
 
     here = os.path.dirname(os.path.abspath(__file__))

@@ -1,6 +1,16 @@
 """
 magenta_crop -- MANUAL border override (boxes come from the markup; PIXELS come
 from the clean original).
+import os as _os
+try:
+    JPEG_Q = max(1, min(100, int(_os.environ.get('DEWARP_JPEG_QUALITY','95'))))
+except ValueError:
+    JPEG_Q = 95
+_JPEG_PARAMS = [cv2.IMWRITE_JPEG_QUALITY, JPEG_Q]
+if JPEG_Q >= 100 and hasattr(cv2, 'IMWRITE_JPEG_SAMPLING_FACTOR_444'):
+    _JPEG_PARAMS += [cv2.IMWRITE_JPEG_SAMPLING_FACTOR,
+                     cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444]
+
 
 If a page is sent with art borders hand-drawn as a continuous MAGENTA outline, the
 outline is taken as ground truth for WHERE the art rectangles are: each closed
@@ -75,6 +85,25 @@ def magenta_boxes(img, min_area_frac=0.03, min_dim=0.15, min_rect=0.80):
             if cv2.contourArea(cnts[i]) < min_rect * w * h:
                 continue
             boxes.append((int(x), int(y), int(x + w), int(y + h)))
+    # Also accept LARGE SOLID magenta regions: a deliberate "fill this area" mark
+    # (including an irregular blob) becomes an art box via its bounding rect. A thin
+    # outline (ring) or straight line has low fill ratio / a tiny dimension, so it is
+    # excluded here and only the loop-hole pass above can turn it into a box -- the
+    # paint false-positive guard is unchanged.
+    ncc, _lbl, st, _c = cv2.connectedComponentsWithStats(m, 8)
+    for j in range(1, ncc):
+        x = int(st[j, cv2.CC_STAT_LEFT]);  y = int(st[j, cv2.CC_STAT_TOP])
+        w = int(st[j, cv2.CC_STAT_WIDTH]); h = int(st[j, cv2.CC_STAT_HEIGHT])
+        area = int(st[j, cv2.CC_STAT_AREA])
+        if not (w * h > min_area_frac * A and w > min_dim * W and h > min_dim * H):
+            continue
+        if area < 0.55 * w * h:                       # not a solid fill -> skip
+            continue
+        nb = (x, y, x + w, y + h)
+        if any(abs(nb[0]-b[0]) < 0.03*W and abs(nb[1]-b[1]) < 0.03*H and
+               abs(nb[2]-b[2]) < 0.03*W and abs(nb[3]-b[3]) < 0.03*H for b in boxes):
+            continue                                   # duplicate of a loop box
+        boxes.append(nb)
     boxes.sort(key=lambda b: (round(b[1] / (0.12 * H)), b[0]))   # top-to-bottom, then left-to-right
     return boxes
 
@@ -164,7 +193,7 @@ if __name__ == '__main__':
             if out is None:
                 print(os.path.basename(p), 'NO MAGENTA'); continue
             stem, ext = os.path.splitext(orig_path)
-            cv2.imwrite(f'{stem}_reconstructed{ext}', out, [cv2.IMWRITE_JPEG_QUALITY, 92])
+            cv2.imwrite(f'{stem}_reconstructed{ext}', out, _JPEG_PARAMS)
             print('%s boxes from %s + original %s -> %d box(es) dewarped %s deg' % (
                 len(boxes), os.path.basename(p), os.path.basename(orig_path),
                 len(boxes), ', '.join('%+.2f' % t for t in thetas)))
@@ -176,7 +205,7 @@ if __name__ == '__main__':
             if out is None:
                 print(os.path.basename(p), 'NO MAGENTA'); continue
             stem, ext = os.path.splitext(p)
-            cv2.imwrite(f'{stem}_magcrop{ext}', out, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            cv2.imwrite(f'{stem}_magcrop{ext}', out, _JPEG_PARAMS)
             print(os.path.basename(p), len(boxes), 'boxes', boxes,
                   '\n  PREVIEW ONLY (literal crop off the markup, no dewarp). For a '
                   'deliverable, re-run with:\n  python3 magenta_crop.py --original '
@@ -227,6 +256,60 @@ def is_full_page_frame(markup, margin_frac=0.06, area_frac=0.55):
     mT = q[:, 1].min() / H; mB = (H - q[:, 1].max()) / H
     area = cv2.contourArea(q.astype(np.int32)) / float(W * H)
     return area > area_frac and max(mL, mR, mT, mB) < margin_frac
+
+
+def magenta_quads(markup, max_quads=5):
+    """4-corner quads (TL,TR,BR,BL) for each closed magenta loop -- the user's 'skew
+    boxes'. Up to max_quads, largest first, returned in page order (top-to-bottom)."""
+    mask = magenta_mask(markup)
+    if (mask > 0).sum() < 2000:
+        return []
+    H, W = mask.shape[:2]
+    kd = max(31, int(0.012 * max(H, W))) | 1
+    mh = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((1, kd), np.uint8))
+    mv = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((kd, 1), np.uint8))
+    mcl = cv2.morphologyEx(cv2.bitwise_or(mh, mv), cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+    cnts, hier = cv2.findContours(mcl, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    if hier is None:
+        return []
+    holes = [c for c, h in zip(cnts, hier[0])
+             if h[3] != -1 and cv2.contourArea(c) > 0.01 * H * W]
+    holes.sort(key=cv2.contourArea, reverse=True)
+    quads = []
+    for c in holes[:max_quads]:
+        peri = cv2.arcLength(c, True)
+        ap = cv2.approxPolyDP(c, 0.03 * peri, True)
+        pts = ap.reshape(-1, 2) if len(ap) == 4 else cv2.boxPoints(cv2.minAreaRect(c))
+        quads.append(_order_quad(pts))
+    quads.sort(key=lambda q: (round(q[0][1] / (0.12 * H)), q[0][0]))
+    return quads
+
+
+def magenta_quad_compose(clean, markup, flatfield_whiten):
+    """Perspective-rectify the content of each magenta skew-box quad (driven by its
+    four corners) to an upright rectangle, composited onto the flat-field-whitened
+    page. Returns (page, n_quads); (None, 0) if the markup has no quad. `clean` and
+    `markup` must be pixel-aligned."""
+    quads = magenta_quads(markup)
+    if not quads:
+        return None, 0
+    canvas = flatfield_whiten(clean).copy()
+    Hc, Wc = canvas.shape[:2]
+    for q in quads:
+        tl, tr, br, bl = q
+        Wt = int(round(max(np.linalg.norm(tr - tl), np.linalg.norm(br - bl))))
+        Ht = int(round(max(np.linalg.norm(bl - tl), np.linalg.norm(br - tr))))
+        if Wt < 8 or Ht < 8:
+            continue
+        dst = np.array([[0, 0], [Wt - 1, 0], [Wt - 1, Ht - 1], [0, Ht - 1]], np.float32)
+        patch = cv2.warpPerspective(clean, cv2.getPerspectiveTransform(q, dst),
+                                    (Wt, Ht), flags=cv2.INTER_CUBIC,
+                                    borderMode=cv2.BORDER_REPLICATE)
+        x0 = max(0, int(round(q[:, 0].min()))); y0 = max(0, int(round(q[:, 1].min())))
+        x1 = min(Wc, x0 + Wt); y1 = min(Hc, y0 + Ht)
+        if x1 > x0 and y1 > y0:
+            canvas[y0:y1, x0:x1] = patch[:y1 - y0, :x1 - x0]
+    return canvas, len(quads)
 
 
 def magenta_frame_dewarp(clean, markup):

@@ -11,7 +11,7 @@ intend to process together, so point this at all of those files at once.
 
 Usage:
     python3 build_profile.py <dir-or-glob> [<dir-or-glob> ...]
-    python3 build_profile.py /home/claude/work/input
+    python3 build_profile.py ./pages
     python3 build_profile.py '/path/*.jpg'
     python3 build_profile.py                 # defaults to ./_PAGES if present
 

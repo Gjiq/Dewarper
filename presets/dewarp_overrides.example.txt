@@ -1,0 +1,34 @@
+# Dewarp page-type overrides — example
+#
+# One line per page you want to pin. Format (either works):
+#     filename.jpg = TYPE
+#     filename.jpg : TYPE
+# Anything after "#" is a comment. Blank lines are ignored.
+#
+# Valid TYPE values:
+#   FULL_BLEED   a full-page artwork (auto: splits into plates if it finds several)
+#   FULL_ART     force ONE panel (never split, even if it looks like several)
+#   MULTI_ART    force multi-picture split (place each artwork separately)
+#   DARK_BG      artwork on a black ground (background is kept black)
+#   TEXT         a text / credits / body-copy page (paper whitened)
+#   SIDE_TEXT    a text column beside the art (left OR right, auto-detected)
+#   SKIP         blank leaf or a page to leave out
+#
+# Use this only for pages the automatic classifier gets wrong — most pages need
+# no entry at all. To use it, either rename this file to  dewarp_overrides.txt
+# and put it in your input folder, or pass it with  --overrides <path>.
+
+# examples:
+# cover.jpg        = FULL_BLEED
+# frontispiece.jpg = DARK_BG
+# colophon.jpg     = TEXT
+# blank_leaf.jpg   = SKIP
+
+# --- Rich per-image settings (JSON only) ---
+# The .json form also accepts per-page rotate + de-curl, on their own or with a type:
+#   {
+#     "cover.jpg":  {"type": "FULL_ART", "rotate": 90},
+#     "plate12.jpg": {"rotate": 180},
+#     "wavy.jpg":   {"decurl": false}
+#   }
+# rotate: 90 | 180 | 270  (clockwise degrees).  decurl: false to turn off curl removal.

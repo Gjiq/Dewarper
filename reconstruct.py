@@ -1,6 +1,6 @@
 """
 Art-plate layout reconstruction pipeline.
-1. Classify each page: DARK_BG | FULL_BLEED | TEXT_LEFT | TEXT | SKIP
+1. Classify each page: DARK_BG | FULL_BLEED | SIDE_TEXT | TEXT | SKIP
 2. Detect art panel bounding boxes per page type
 3. Clean-crop each panel (straight edges, 75th-percentile inward cut)
 4. Paste each panel at its original page position on a fresh canvas
@@ -11,6 +11,7 @@ detection entirely: they go through the text-page treatment in dewarp_text.py
 """
 import cv2
 import numpy as np
+import math
 import os
 from scipy.ndimage import uniform_filter1d, gaussian_filter
 from scipy.signal import find_peaks
@@ -85,7 +86,7 @@ DESKEW_PAGE_TEXT = True
 # compose_fullbleed.
 PAGE_DEWARP = True
 
-# Per-panel deslope for TEXT_LEFT / DARK_BG pages. These go through clean_crop,
+# Per-panel deslope for SIDE_TEXT / DARK_BG pages. These go through clean_crop,
 # which only makes a straight axis-aligned cut and never rotates -- so any panel
 # tilt rode straight through. With this on, each panel's reliable angle is removed
 # (same _reliable_angle the FULL_BLEED deskew uses) before the straight cut, so
@@ -103,7 +104,7 @@ RESUME = True
 # leaked into the art block along its straight deskew edges -- the thin triangular
 # slivers/seams from a small residual deskew angle. Strict near-white + border-
 # connected, so pale ART (misty skies, light backgrounds) is preserved. Applied
-# to every *_reconstructed.jpg (FULL_BLEED / multi / TEXT_LEFT / DARK_BG); TEXT
+# to every *_reconstructed.jpg (FULL_BLEED / multi / SIDE_TEXT / DARK_BG); TEXT
 # pages are untouched. See deskew_crop.remove_edge_slivers.
 EDGE_SLIVER_FIX = False   # OFF: a properly dewarped plate fills its rectangle, so
                           # there is no sliver to paint over. A leftover sliver means
@@ -111,8 +112,21 @@ EDGE_SLIVER_FIX = False   # OFF: a properly dewarped plate fills its rectangle, 
                           # hidden with paper texture. (remove_edge_slivers kept in
                           # deskew_crop.py for reference but no longer wired in.)
 
-INPUT_DIR  = os.environ.get('DEWARP_INPUT',  '/home/claude/work/input')
-OUTPUT_DIR = os.environ.get('DEWARP_OUTPUT', '/home/claude/work/output')
+INPUT_DIR  = os.environ.get('DEWARP_INPUT',  './pages')
+OUTPUT_DIR = os.environ.get('DEWARP_OUTPUT', './out')
+# Output JPEG quality (1-100). Default 95 is near-visually-lossless; set 100 (env
+# DEWARP_JPEG_QUALITY or GUI 'Maximum') to keep files close to the original size.
+try:
+    JPEG_Q = max(1, min(100, int(os.environ.get('DEWARP_JPEG_QUALITY', '95'))))
+except ValueError:
+    JPEG_Q = 95
+# Encode params. At q100 use 4:4:4 (no chroma subsampling) so 'Original quality'
+# matches the source scan's fidelity; cv2's default q100 is 4:2:0 (smaller, softer
+# colour). Lower presets keep the default subsampling for smaller files.
+_JPEG_PARAMS = [cv2.IMWRITE_JPEG_QUALITY, JPEG_Q]
+if JPEG_Q >= 100 and hasattr(cv2, 'IMWRITE_JPEG_SAMPLING_FACTOR_444'):
+    _JPEG_PARAMS += [cv2.IMWRITE_JPEG_SAMPLING_FACTOR,
+                     cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444]
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ── Page classifier ───────────────────────────────────────────────────────────
@@ -161,7 +175,7 @@ def text_structure(gray, dark_text=True):
       dark_text=False : light/white text on a dark ground (THRESH_BINARY) --
                         the polarity needed for white-on-black pages.
 
-    Reference (Spectrum 20): text pages 53-72% / 150-180 lines; art plates
+    Reference (a glossy art-annual scan set): text pages 53-72% / 150-180 lines; art plates
     1.6-2.7% / 9-15 lines.
     """
     H, W = gray.shape
@@ -216,7 +230,8 @@ def dark_ground_stats(img_bgr, ring_frac=0.045):
     dark, fairly consistent MARGIN ring at the page edges; scanner GLOSS /
     reflection only ever brightens a MINORITY of that ring, so a robust median +
     dark-fraction over the ring ride straight over the gloss (where a single
-    corner sample is fooled -- Spectrum 20 p036 corner=82, p305 corner=100, both
+    corner sample is fooled -- e.g. two observed art-on-black scans measured corner=82
+    and corner=100, both
     actually black-ground). Returns (ring_median, dark_fraction, gloss_fraction).
       ring_median  : median luminance of the outer ring (low => dark ground)
       dark_fraction: share of ring darker than 70 (high => consistent dark margin)
@@ -310,7 +325,7 @@ def _offwhite_canvas(H, W, tone=244, grain=3):
 
 def classify_page(img_bgr):
     """
-    Returns one of: 'DARK_BG' | 'FULL_BLEED' | 'TEXT_LEFT' | 'TEXT' | 'SKIP'
+    Returns one of: 'DARK_BG' | 'FULL_BLEED' | 'SIDE_TEXT' | 'TEXT' | 'SKIP'
     """
     H, W = img_bgr.shape[:2]
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
@@ -380,12 +395,12 @@ def classify_page(img_bgr):
             # does not — those are single-plate pages and fall through to FULL_BLEED.
             zone = gray[:, :min(strip_end, 200)]
             if _count_text_lines(zone) > 30:
-                return 'TEXT_LEFT', bg
+                return 'SIDE_TEXT', bg
 
     # ── Side text column on the RIGHT (v68) ───────────────────────────────────
     # Mirror of the left test: art bleeds off the LEFT edge (high leftmost_sat) and the
     # credit column sits against the RIGHT margin (low rightmost_sat). Same >30 real-line
-    # guard keeps full-bleed plates with a plain right paper margin out. Returns TEXT_LEFT
+    # guard keeps full-bleed plates with a plain right paper margin out. Returns SIDE_TEXT
     # because the side-text branch (detect_panels + deskew_side_text) is now side-aware and
     # handles a column on either side; only genuine text columns reach it.
     if rightmost_sat < 35:
@@ -398,7 +413,7 @@ def classify_page(img_bgr):
             zin  = gray[:, strip_start:min(strip_start + 200, W)]  # left-justified col: dense at its left edge
             zout = gray[:, W - 200:]                               # right-justified col: dense at the page edge
             if max(_count_text_lines(zin), _count_text_lines(zout)) > 30:
-                return 'TEXT_LEFT', bg
+                return 'SIDE_TEXT', bg
 
     # Bilateral binder margins with no text column = centered art panel
     if leftmost_sat < 35 and rightmost_sat < 35:
@@ -408,140 +423,109 @@ def classify_page(img_bgr):
 
 
 # Pages that auto-classification gets wrong — override here
-PAGE_OVERRIDES = {
-    # Spectrum 17 p044/p059/p065/p104/p105 (v72): classify_page sent five real full-bleed
-    # PAINTINGS / multi-plate showcase pages to SKIP via the "mottled / decorative leaf"
-    # branch (heavy saturated coverage on a dark-ish ground, colour cov 30-76%%, meanL
-    # 130-165). Verified this session by MEASUREMENT + a forced-reconstruction test (inline
-    # image viewer down): forcing FULL_BLEED preserves coverage (in->out 76.2->73.4,
-    # 49.6->46.2, 72.0->68.8, 30.8->29.2, 29.6->24.4) with sensible plate counts under v71's
-    # stacked-plate split (p059->3, p104->3, p044/p065/p105->1), none a spurious box. Same
-    # surgical fix as Spectrum 22/24/16/13/12 -- do NOT loosen classify_page. p003 is a
-    # genuine blank leaf (meanL 255, 0%% colour) and is correctly left as SKIP.
-    'Spectrum 17_Page_044.jpg': 'FULL_BLEED',
-    'Spectrum 17_Page_059.jpg': 'FULL_BLEED',
-    'Spectrum 17_Page_065.jpg': 'FULL_BLEED',
-    'Spectrum 17_Page_104.jpg': 'FULL_BLEED',
-    'Spectrum 17_Page_105.jpg': 'FULL_BLEED',
-    # Spectrum 2 side-text pages (v68). classify_page's side-column line count samples a
-    # narrow 200px zone at the margin; these credit columns are indented / short enough
-    # (17-27 real lines, verified this session by full-column line count + a clean
-    # left-margin fit residual on the whitened canvas) that they miss the >30 gate and fell
-    # to FULL_BLEED. 157 is the RIGHT-side case (art on the left, credit column on the
-    # right). All are genuine columns; detect_panels + deskew_side_text pick the side and
-    # stand the justified edge vertical. Surgical, per convention -- do NOT loosen
-    # classify_page (its gate is shared with real full-bleed plates that score 20-30).
-    'Spectrum 2_Page_024.jpg': 'TEXT_LEFT',
-    'Spectrum 2_Page_030.jpg': 'TEXT_LEFT',
-    'Spectrum 2_Page_032.jpg': 'TEXT_LEFT',
-    'Spectrum 2_Page_034.jpg': 'TEXT_LEFT',
-    'Spectrum 2_Page_157.jpg': 'TEXT_LEFT',
-    # Spectrum 24 p009/p106/p202: classify_page sent three real full-bleed PAINTINGS
-    # to SKIP via the "mottled / decorative leaf" branch (colour cov 23-70%, meanL
-    # 131-157, dark ground). p010 (colour 7%, ink 16%, meanL 167) also dropped: a
-    # muted low-sat plate -- forced FULL_BLEED and confirmed by content-retention that
-    # it reconstructs a real plate (not a spurious box). Verified by MEASUREMENT this
-    # session (inline image viewer down, as in the Spectrum 9 p045/p131 session);
-    # QC crops kept for a later eyeball. Same surgical fix as Spectrum 16/13/12 -- do
-    # NOT loosen classify_page.
-    'Spectrum 24_Page_009.jpg': 'FULL_BLEED',
-    'Spectrum 24_Page_010.jpg': 'FULL_BLEED',
-    'Spectrum 24_Page_106.jpg': 'FULL_BLEED',
-    'Spectrum 24_Page_202.jpg': 'FULL_BLEED',
-    # Spectrum 22 p002/p011/p083/p101/p130/p155/p179/p249: classify_page sent eight
-    # real full-bleed PAINTINGS to SKIP via the "mottled / decorative leaf" branch
-    # (heavy/darker coverage on a shaded ground; colour cov ~3-52%, meanL ~145-168).
-    # Verified on-screen this session -- all eight are single full-bleed art plates;
-    # p249 (3% colour) and p155 (11%) are MUTED low-saturation paintings, not text
-    # pages. Forced FULL_BLEED reconstructions were eyeballed clean (no spurious box).
-    # Same surgical approach as Spectrum 16/13/12/10/9 -- do NOT loosen classify_page.
-    # NB filenames are the lowercase 'spectrum 22_Page_NNN.jpg' exactly as delivered.
-    'spectrum 22_Page_002.jpg': 'FULL_BLEED',
-    'spectrum 22_Page_011.jpg': 'FULL_BLEED',
-    'spectrum 22_Page_083.jpg': 'FULL_BLEED',
-    'spectrum 22_Page_101.jpg': 'FULL_BLEED',
-    'spectrum 22_Page_130.jpg': 'FULL_BLEED',
-    'spectrum 22_Page_155.jpg': 'FULL_BLEED',
-    'spectrum 22_Page_179.jpg': 'FULL_BLEED',
-    'spectrum 22_Page_249.jpg': 'FULL_BLEED',
-    # Spectrum 16 p006/p108/p180/p188/p207/p235: classify_page sent six real
-    # full-bleed PAINTINGS to SKIP via the "mottled / decorative leaf" branch
-    # (heavy saturated coverage on a shaded/dark ground). Verified on-screen this
-    # session -- all six are single full-bleed art plates (colour cov 22-63%,
-    # meanL 135-168). Forced FULL_BLEED gives clean reconstructions. Same surgical
-    # approach as Spectrum 13 p080/086/106/177 and Spectrum 12 p019/p077 -- do NOT
-    # loosen classify_page. p002 is a genuine blank white leaf (meanL 255, 0% colour)
-    # and is correctly left as SKIP.
-    'Spectrum 16_Page_006.jpg': 'FULL_BLEED',
-    'Spectrum 16_Page_108.jpg': 'FULL_BLEED',
-    'Spectrum 16_Page_180.jpg': 'FULL_BLEED',
-    'Spectrum 16_Page_188.jpg': 'FULL_BLEED',
-    'Spectrum 16_Page_207.jpg': 'FULL_BLEED',
-    'Spectrum 16_Page_235.jpg': 'FULL_BLEED',
-    # Spectrum 13 p080/p086/p106/p177: classify_page sent four real full-bleed
-    # PAINTINGS to SKIP -- each read as a "mottled / decorative leaf" (the SKIP branch)
-    # because of heavy saturated coverage on a dark ground (colour cov 28-55%). Verified
-    # on-screen this session: all four are single full-bleed art plates. Forced
-    # FULL_BLEED gives a clean reconstruction (same surgical fix as Spectrum 12 p019/p077,
-    # Spectrum 10 p042/p121, Spectrum 9 p045 -- do NOT loosen classify_page). p002 is a
-    # genuine blank leaf and is correctly left as SKIP.
-    'Spectrum 13_Page_080.jpg': 'FULL_BLEED',
-    'Spectrum 13_Page_086.jpg': 'FULL_BLEED',
-    'Spectrum 13_Page_106.jpg': 'FULL_BLEED',
-    'Spectrum 13_Page_177.jpg': 'FULL_BLEED',
-    # Spectrum 12 p003/p019/p077: classify_page sent three real content pages to SKIP.
-    # Verified on-screen + by measurement this session (same surgical approach as the
-    # Spectrum 9/10 entries below -- do NOT loosen classify_page):
-    #   p003 -> TEXT: light TONED title/section page (meanL 198, ~2.3%% dark ink). SKIP
-    #           dropped it; TEXT whitens the ground and keeps the title text.
-    #   p019 -> FULL_BLEED: full-bleed saturated PAINTING (96.7%% colour coverage) read
-    #           as a mottled/decorative leaf and dropped (cf. Spectrum 9 p045).
-    #   p077 -> FULL_BLEED: full-bleed atmospheric PAINTING (29.6%% colour coverage)
-    #           dropped the same way (cf. Spectrum 10 p042).
-    'Spectrum 12_Page_003.jpg': 'TEXT',
-    'Spectrum 12_Page_019.jpg': 'FULL_BLEED',
-    'Spectrum 12_Page_077.jpg': 'FULL_BLEED',
-    # Spectrum 10 p042/p120/p121: classify_page sent all three to SKIP. Verified
-    # (measurement + on-screen) they are real content, so pin them (same surgical
-    # approach as the Spectrum 9 p045/p131 entries -- do NOT loosen classify_page):
-    #   p042 -> FULL_BLEED: vivid multi-plate showcase (3 real plates, 37%% colour)
-    #           read as a mottled/decorative leaf and dropped.
-    #   p121 -> FULL_BLEED: single full-bleed painting (31%% colour) dropped likewise.
-    #   p120 -> TEXT: low-sat TONED text page (meanL 182). SKIP dropped it; FULL_BLEED
-    #           would find a spurious box. TEXT whitens (182->227) and keeps the text.
-    'Spectrum 10_Page_042.jpg': 'FULL_BLEED',
-    'Spectrum 10_Page_121.jpg': 'FULL_BLEED',
-    'Spectrum 10_Page_120.jpg': 'TEXT',
-    # Spectrum 9 p045/p131: classify_page sent both to SKIP (p045 reads as a heavily
-    # "mottled" high-coverage leaf -- but it is a vivid full-bleed painting; p131 is a
-    # low-sat page). Forced FULL_BLEED to attempt a reconstruction; verify the crops.
-    'Spectrum 9_Page_045.jpg': 'FULL_BLEED',
-    'Spectrum 9_Page_131.jpg': 'TEXT',
-    # Force a page type for specific filenames when the classifier guesses wrong.
-    # Example: 'some_page.jpg': 'SKIP'  (skip)  or  'TEXT' / 'FULL_BLEED' / 'DARK_BG'.
-    # Leave empty to rely entirely on classify_page().
-    'Spectrum 20_Page_006.jpg': 'SKIP',   # copyright/indicia page (ISBN, sponsor
-                                          # logos) with a decorative dragon behind
-                                          # the text -- not a credited plate; the
-                                          # art path tore it.
-    # Spectrum 4 artist-index pages: multi-column small-text directory like p156/157
-    # (which classify_page sends to TEXT correctly). p158/p159 slip to FULL_BLEED;
-    # under v37 the art path + rewritten _clean_background ERASES most of the index
-    # text (only the column inside the detected rect survives) -- worse than the v34
-    # grey-ground result. Force TEXT so they get the clean whitened-columns path the
-    # sibling index pages get. (classify_page under-scores text_structure on these two
-    # scans; a future gate tune could catch them, but do not loosen it enough to pull
-    # real plates into TEXT.)
-    'Spectrum 4_Page_158_Image_0001.jpg': 'TEXT',
-    'Spectrum 4_Page_159_Image_0001.jpg': 'TEXT',
-    # Spectrum 2 back-matter artist index (two credit columns, ~8 and ~7 lines of
-    # small low-saturation text). classify_page sent p154 to SKIP -- but it holds real
-    # index text (59%% non-paper, sat 12), so force TEXT for the clean whitened-columns
-    # path like its sibling index pages.
-    'Spectrum 2_Page_154.jpg': 'TEXT',
-    # (Spectrum 2 p013 essay and p153 index no longer need overrides -- the v40 >74%
-    # text+paper TEXT gate classifies both as TEXT automatically.)
-}
+# ----------------------------------------------------------------------------
+# PAGE-TYPE OVERRIDES  (per-job, loaded from an external file -- not baked in)
+# ----------------------------------------------------------------------------
+# When the classifier mis-types a specific scan, pin that page's type here rather
+# than loosening the classifier. Overrides are DATA, not code -- keep them in a
+# file for the job you are running, so the tool itself stays general.
+#
+# Source, in priority order:
+#   1. the path in the DEWARP_OVERRIDES env var (set by  dewarp_cli --overrides), or
+#   2. dewarp_overrides.json  or  dewarp_overrides.txt  found in the input folder.
+# If none is found, no overrides are applied (pure classifier output).
+#
+# File format -- JSON:  {"my_page.jpg": "FULL_BLEED", "blank.jpg": "SKIP"}
+#             or TEXT:  my_page.jpg = FULL_BLEED        ("#" starts a comment)
+#                       blank.jpg   : SKIP
+# Valid types: FULL_BLEED | FULL_ART | MULTI_ART | TEXT | SIDE_TEXT | DARK_BG | SKIP
+#   FULL_ART = force one panel; MULTI_ART = force multi-picture split.
+#   (TEXT_LEFT / TEXT_RIGHT are accepted as aliases for SIDE_TEXT)
+# A ready-made preset for the Spectrum art annuals ships in
+# presets/spectrum_overrides.json -- point --overrides at it to reproduce those runs.
+
+VALID_PAGE_TYPES = {'FULL_BLEED', 'TEXT', 'SIDE_TEXT', 'DARK_BG', 'SKIP',
+                    'FULL_ART', 'MULTI_ART'}
+# FULL_ART / MULTI_ART are FULL_BLEED with the picture-split forced: FULL_ART = one
+# panel (never split), MULTI_ART = always use the multi composer (each picture placed
+# separately). Plain FULL_BLEED auto-decides (multi when 2+ pictures are detected).
+# Accepted input aliases (normalised on load). SIDE_TEXT is the canonical name
+# for a text column beside art; the side (left OR right) is detected automatically.
+PAGE_TYPE_ALIASES = {'TEXT_LEFT': 'SIDE_TEXT', 'TEXT_RIGHT': 'SIDE_TEXT'}
+
+
+def _parse_overrides_text(text):
+    """Parse the simple 'name = TYPE' / 'name : TYPE' text format ('#' = comment)."""
+    out = {}
+    for raw in text.splitlines():
+        line = raw.split('#', 1)[0].strip()
+        if not line:
+            continue
+        if '=' in line:
+            k, v = line.split('=', 1)
+        elif ':' in line:
+            k, v = line.split(':', 1)
+        else:
+            continue
+        out[k.strip().strip('"\'')] = v.strip().strip('"\'')
+    return out
+
+
+def load_page_overrides(input_dir):
+    """Load per-job page-type overrides from an external JSON or text file.
+    Returns (types, settings): types={file: PAGE_TYPE}; settings={file:
+    {"rotate": 0|90|180|270, "decurl": bool}}. Empty if no override file."""
+    import json
+    path = os.environ.get('DEWARP_OVERRIDES', '').strip()
+    if not path:
+        for cand in ('dewarp_overrides.json', 'dewarp_overrides.txt'):
+            p = os.path.join(input_dir, cand)
+            if os.path.isfile(p):
+                path = p
+                break
+    if not path or not os.path.isfile(path):
+        return {}, {}
+    try:
+        raw = open(path, encoding='utf-8').read()
+        data = json.loads(raw) if path.lower().endswith('.json') else _parse_overrides_text(raw)
+    except Exception as e:
+        print(f"[overrides] could not read {path}: {e}")
+        return {}, {}
+    types = {}
+    settings = {}
+    for k, v in data.items():
+        rot, dec, t = 0, True, None
+        icrop = True
+        if isinstance(v, dict):
+            t = v.get('type')
+            try:
+                rot = int(v.get('rotate', 0)) % 360
+            except (TypeError, ValueError):
+                rot = 0
+            if rot not in (90, 180, 270):
+                rot = 0
+            dec = bool(v.get('decurl', True))
+            icrop = bool(v.get('inline_crop', True))
+        else:
+            t = v
+        if t is not None:
+            tt = PAGE_TYPE_ALIASES.get(str(t).strip().upper(), str(t).strip().upper())
+            if tt in VALID_PAGE_TYPES:
+                types[k] = tt
+            elif tt not in ('', 'AUTO'):
+                print(f"[overrides] ignoring type for '{k}': unknown '{t}' "
+                      f"(valid: {', '.join(sorted(VALID_PAGE_TYPES))})")
+        if rot or not dec or not icrop:
+            settings[k] = {"rotate": rot, "decurl": dec, "inline_crop": icrop}
+    if types or settings:
+        print(f"[overrides] loaded {len(types)} type override(s), "
+              f"{len(settings)} page setting(s) from {path}")
+    return types, settings
+
+
+# Filled at import from the external source above (empty when running general scans).
+PAGE_OVERRIDES, PAGE_SETTINGS = load_page_overrides(INPUT_DIR)
+
 
 
 # ── Panel detection ───────────────────────────────────────────────────────────
@@ -911,6 +895,10 @@ for _norm, _group in _by_norm.items():
             return False
         if len(magenta_crop.magenta_boxes(im)) >= 1:
             return True
+        # a deliberately SKEWED skew-box (rotated quad) fails the rectangular-hole
+        # gate in magenta_boxes but is a valid closed 4-corner loop -> accept it.
+        if len(magenta_crop.magenta_quads(im)) >= 1:
+            return True
         # a text WARP guide is open (no loop): a stack of >=2 horizontal guides, or a
         # >=3-sided box. Incidental paint forms no such thin-stroke set -> safe.
         for r in _mtext.magenta_regions(im):
@@ -1014,7 +1002,7 @@ for fname in files:
         if magenta_crop.is_full_page_frame(img):
             out = magenta_crop.magenta_frame_blackcover(orig_img, img)
             cv2.imwrite(os.path.join(OUTPUT_DIR, f'{out_stem}_reconstructed.jpg'),
-                        out, [cv2.IMWRITE_JPEG_QUALITY, 93])
+                        out, _JPEG_PARAMS)
             print(f'{fname}: MAGENTA full-page frame + original {orig_name} '
                   f'-> rectified + black warp-cover -> {out.shape[1]}x{out.shape[0]}')
             continue
@@ -1041,10 +1029,32 @@ for fname in files:
                     out[_py:_py + _patch.shape[0], _px:_px + _patch.shape[1]] = _patch
                     _ntext += 1
             cv2.imwrite(os.path.join(OUTPUT_DIR, f'{out_stem}_reconstructed.jpg'),
-                        out, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                        out, _JPEG_PARAMS)
             print(f'{fname}: MAGENTA boxes ({len(mboxes)}) + original {orig_name} '
                   f'-> DARK keep-black reconstruct'
                   + (f' + {_ntext} text block(s) corrected' if _ntext else ''))
+            continue
+        # v78: SKEW-BOX quads. If the markup's box(es) are deliberately non-axis-aligned
+        # (the editor's Skew Box with corners dragged onto rotated/perspective art),
+        # rectify each quad from its 4 corners. Axis-aligned boxes fall through to the
+        # proven box + edge-deskew path below.
+        _quads = magenta_crop.magenta_quads(img)
+        _skewed = False
+        for _q in _quads:
+            (tlx, tly), (trx, tryy), (brx, bry), (blx, bly) = _q
+            _atop = abs(math.degrees(math.atan2(tryy - tly, trx - tlx)))
+            _alft = abs(abs(math.degrees(math.atan2(bly - tly, blx - tlx))) - 90.0)
+            if _atop > 2.5 or _alft > 2.5:
+                _skewed = True
+                break
+        if _quads and _skewed:
+            out, _nq = magenta_crop.magenta_quad_compose(orig_img, img, flatfield_whiten)
+            if EDGE_SLIVER_FIX and out is not None:
+                out = deskew_crop.remove_edge_slivers(out)
+            cv2.imwrite(os.path.join(OUTPUT_DIR, f'{out_stem}_reconstructed.jpg'),
+                        out, _JPEG_PARAMS)
+            print(f'{fname}: MAGENTA {_nq} skew-box quad(s) + original {orig_name} '
+                  f'-> perspective-rectified')
             continue
         out, boxes, thetas = magenta_crop.magenta_dewarp(img, orig_img, flatfield_whiten)
         if out is None:
@@ -1072,7 +1082,7 @@ for fname in files:
         if EDGE_SLIVER_FIX:
             out = deskew_crop.remove_edge_slivers(out)
         cv2.imwrite(os.path.join(OUTPUT_DIR, f'{out_stem}_reconstructed.jpg'),
-                    out, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                    out, _JPEG_PARAMS)
         print(f'{fname}: MAGENTA boxes ({len(boxes)}) + original {orig_name} -> '
               'dewarped ' + ', '.join(f'{t:+.2f}' for t in thetas) + ' deg'
               + (f' + {_ntext} text block(s) corrected' if _ntext else ''))
@@ -1089,22 +1099,39 @@ for fname in files:
               f'scan, no magenta) and re-run; boxes saved -> {os.path.basename(sc)}')
         continue
 
+    _rot = PAGE_SETTINGS.get(fname, {}).get('rotate', 0)
+    if _rot in (90, 180, 270):
+        img = cv2.rotate(img, {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180,
+                               270: cv2.ROTATE_90_COUNTERCLOCKWISE}[_rot])
+        H, W = img.shape[:2]
+        print(f'{fname}: rotated {_rot} deg')
     page_type, bg = classify_page(img)
+    _force_split = None      # 'single' (FULL_ART) | 'multi' (MULTI_ART) forced routing
     if fname in PAGE_OVERRIDES:
-        page_type = PAGE_OVERRIDES[fname]
+        _ov = PAGE_OVERRIDES[fname]
+        if _ov == 'FULL_ART':
+            page_type, _force_split = 'FULL_BLEED', 'single'
+        elif _ov == 'MULTI_ART':
+            page_type, _force_split = 'FULL_BLEED', 'multi'
+        else:
+            page_type = _ov
     print(f'{fname}: {page_type}', end='')
+    # 'inline crop' (default on) = the deliberate inward inset; off keeps the full extent
+    deskew_crop.CROP_MARGIN_FRAC = 0.0 if \
+        PAGE_SETTINGS.get(fname, {}).get('inline_crop', True) is False else 0.015
 
     if page_type == 'SKIP':
         # a SKIP page (usually a vivid full-bleed misread as blank) is written back with
         # a _skipped suffix so the batch is complete and these are flagged for review.
         stem = fname.replace('.jpg', '')
         cv2.imwrite(os.path.join(OUTPUT_DIR, f'{stem}_skipped.jpg'),
-                    img, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                    img, _JPEG_PARAMS)
         print(' — skipped (written back as _skipped)')
         continue
 
     # Page-level curl pre-pass (multi-picture pages only; auto-no-op otherwise).
-    if PAGE_DEWARP and page_type in ('FULL_BLEED', 'TEXT_LEFT', 'DARK_BG'):
+    _decurl_on = PAGE_SETTINGS.get(fname, {}).get('decurl', True)
+    if PAGE_DEWARP and _decurl_on and page_type in ('FULL_BLEED', 'SIDE_TEXT', 'DARK_BG'):
         img, _pd = page_dewarp.dewarp_page(img, bg)
         if _pd.get('applied'):
             print(f" [page-decurl {_pd['edges_ok']}edges {_pd['field_range']}]", end='')
@@ -1124,7 +1151,7 @@ for fname in files:
                 print(f'    text-curl-dewarp: {_ntc} area(s)')
         stem = fname.replace('.jpg', '')
         outpath = os.path.join(OUTPUT_DIR, f'{stem}_text.jpg')
-        cv2.imwrite(outpath, out, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        cv2.imwrite(outpath, out, _JPEG_PARAMS)
         print(' — dewarped + whitened')
         continue
 
@@ -1143,20 +1170,34 @@ for fname in files:
         # How many distinct artworks on the page? Index / showcase pages carry
         # 2+ separate pictures plus a caption column; ordinary plates carry one.
         _kd = magenta_crop.keyline_deskew(img)      # v62: keyline deskew (light-bg frames too)
-        if _kd is not None:
+        if _kd is not None and _force_split != 'multi':
             _st = fname.replace('.jpg','')
-            cv2.imwrite(os.path.join(OUTPUT_DIR, f'{_st}_reconstructed.jpg'), _kd, [cv2.IMWRITE_JPEG_QUALITY, 92])
+            cv2.imwrite(os.path.join(OUTPUT_DIR, f'{_st}_reconstructed.jpg'), _kd, _JPEG_PARAMS)
             print(' -> FULL_BLEED keyline deskew'); continue
         pics = art_pictures(img, bg)
         stem = fname.replace('.jpg', '')
-        if len(pics) >= 2:
-            print(f' -> {len(pics)} pictures (multi)')
+        # Auto: multi when 2+ pictures are found. FULL_ART forces one panel;
+        # MULTI_ART forces the multi composer (each detected picture placed on its own).
+        if _force_split is None:
+            _want_multi = len(pics) >= 2
+        else:
+            _want_multi = (_force_split == 'multi')
+        if _want_multi and len(pics) >= 1:
+            tag = ' (multi)' if _force_split is None else ' (forced multi)'
+            print(f' -> {len(pics)} picture(s){tag}')
             out, thetas = compose_multi(img, bg, flatfield_whiten, pics,
                                          center_content=CENTER_MULTI)
             print('    deskew ' + ', '.join(f'{t:+.2f}' for t in thetas) + ' deg')
         else:
-            print(' -> 1 panel')
-            out, theta = compose_fullbleed(img, pics[0], bg, flatfield_whiten,
+            if _force_split == 'single' and len(pics) >= 2:
+                # force ONE panel: union bbox of all detected pictures ([x0,y0,x1,y1])
+                one = [min(b[0] for b in pics), min(b[1] for b in pics),
+                       max(b[2] for b in pics), max(b[3] for b in pics)]
+                print(' -> 1 panel (forced single, union of %d)' % len(pics))
+            else:
+                one = pics[0]
+                print(' -> 1 panel')
+            out, theta = compose_fullbleed(img, one, bg, flatfield_whiten,
                                             center=CENTER_SINGLE)
             print(f'    deskew {theta:+.2f} deg')
         if EDGE_SLIVER_FIX:
@@ -1203,12 +1244,12 @@ for fname in files:
             if _ntc:
                 print(f'    text-curl-dewarp: {_ntc} area(s)')
         cv2.imwrite(os.path.join(OUTPUT_DIR, f'{stem}_reconstructed.jpg'),
-                    out, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                    out, _JPEG_PARAMS)
         continue
 
     dark_bg   = page_type == 'DARK_BG'
 
-    # Canvas/background. TEXT_LEFT pages are on scanned paper: use the real paper
+    # Canvas/background. SIDE_TEXT pages are on scanned paper: use the real paper
     # TEXTURE by basing the canvas on the flat-field-whitened page (lighting
     # normalised, paper grain + caption text + page/plate numbers kept) rather
     # than a flat average colour. Cleaned panels paste on top; anywhere a crop
@@ -1227,7 +1268,7 @@ for fname in files:
         # corners -> perspective). Validated (all 4 edges on the line) or returns None.
         _kd = magenta_crop.keyline_deskew(img)
         if _kd is not None:
-            cv2.imwrite(os.path.join(OUTPUT_DIR, f'{stem}_reconstructed.jpg'), _kd, [cv2.IMWRITE_JPEG_QUALITY, 92])
+            cv2.imwrite(os.path.join(OUTPUT_DIR, f'{stem}_reconstructed.jpg'), _kd, _JPEG_PARAMS)
             print(' -> DARK_BG keyline deskew')
             continue
         inv = 255 - img
@@ -1254,7 +1295,7 @@ for fname in files:
         _exp = fp & (~covered); base[_exp] = img[_exp]
         print(f' -> light dewarp via inversion, deskew {theta:+.2f} deg')
         cv2.imwrite(os.path.join(OUTPUT_DIR, f'{stem}_reconstructed.jpg'),
-                    base, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                    base, _JPEG_PARAMS)
         continue
 
     canvas = flatfield_whiten(img)
@@ -1297,6 +1338,6 @@ for fname in files:
     outpath = os.path.join(OUTPUT_DIR, f'{stem}_reconstructed.jpg')
     if EDGE_SLIVER_FIX:
         canvas = deskew_crop.remove_edge_slivers(canvas)
-    cv2.imwrite(outpath, canvas, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    cv2.imwrite(outpath, canvas, _JPEG_PARAMS)
 
 print('\nDone.')

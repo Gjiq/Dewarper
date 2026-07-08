@@ -33,6 +33,16 @@ Two operations, both keep/relocate original pixels (no OCR):
                          by the TEXT branch of the reconstruction pipeline.
 """
 import cv2, numpy as np
+import os as _os
+try:
+    JPEG_Q = max(1, min(100, int(_os.environ.get('DEWARP_JPEG_QUALITY','95'))))
+except ValueError:
+    JPEG_Q = 95
+_JPEG_PARAMS = [cv2.IMWRITE_JPEG_QUALITY, JPEG_Q]
+if JPEG_Q >= 100 and hasattr(cv2, 'IMWRITE_JPEG_SAMPLING_FACTOR_444'):
+    _JPEG_PARAMS += [cv2.IMWRITE_JPEG_SAMPLING_FACTOR,
+                     cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444]
+
 from scipy.signal import find_peaks
 from scipy.interpolate import griddata
 from scipy.ndimage import gaussian_filter
@@ -207,7 +217,7 @@ if __name__ == '__main__':
         im = cv2.imread(path)
         stem = os.path.splitext(path)[0]
         cv2.imwrite(f'{stem}_text.jpg', process_text_page(im),
-                    [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    _JPEG_PARAMS)
         print(path, 'done')
 
 
